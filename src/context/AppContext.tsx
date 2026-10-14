@@ -6,30 +6,24 @@ import {
   PageBlock,
   News,
   EventItem,
+  ProjectItem,
   ResultItem,
   Municipality,
   VideoItem,
   MediaItem,
   Demand,
   AuditLog,
-  Task,
-  ProjectItem,
 } from '../types';
-import { useAppUi } from './AppUiContext';
-import { getSupabaseClient } from '../lib/supabaseClient';
-import { PublicLegislativeItemDto } from '../contracts/publicLegislative';
-import type { PublicDocumentDto } from '../contracts/publicArchive';
 
 interface AppContextType {
   settings: SiteSettings | null;
-  currentUser: User | null;
+  currentUser: User;
   allUsers: User[];
   currentView: string;
   selectedNewsSlug: string | null;
   trackingProtocol: string | null;
   isProtocolModalOpen: boolean;
   pages: Page[];
-  adminPages: Page[];
   news: News[];
   events: EventItem[];
   projects: ProjectItem[];
@@ -39,82 +33,107 @@ interface AppContextType {
   media: MediaItem[];
   demands: Demand[];
   auditLogs: AuditLog[];
-  tasks: Task[];
-  legislativeItems: PublicLegislativeItemDto[];
-  documents: PublicDocumentDto[];
   isLoading: boolean;
   toastMessage: string | null;
   toastType: 'success' | 'error' | 'info';
 
+  // Navigation & Actions
   setCurrentView: (view: string) => void;
   openNewsDetail: (slug: string) => void;
   openProtocolModal: (protocol?: string) => void;
-  openCitizenModal: (initialSubject?: string) => void;
+  openCitizenModal: (category?: string) => void;
   closeProtocolModal: () => void;
-  signOut: () => Promise<void>;
-  switchUser: (userId: string) => Promise<boolean>;
-  authReady: boolean;
+  switchUser: (userId: string) => Promise<void>;
   updateSettings: (newSettings: Partial<SiteSettings>) => Promise<boolean>;
   updatePage: (
     pageId: string,
     pageData: {
       blocks?: PageBlock[];
       title?: string;
-      slug?: string;
       description?: string;
-      seoTitle?: string;
-      seoDescription?: string;
       status?: 'publicado' | 'rascunho';
       publish?: boolean;
       note?: string;
     }
   ) => Promise<{ success: boolean; data?: Page; error?: string }>;
-  createPage: (pageData: {
-    title: string;
-    slug: string;
-    description?: string;
-    seoTitle?: string;
-    seoDescription?: string;
-    status?: 'publicado' | 'rascunho';
-    blocks?: PageBlock[];
-    publish?: boolean;
-    note?: string;
-  }) => Promise<{ success: boolean; data?: Page; error?: string }>;
-  rollbackPage: (pageId: string, versionId: string) => Promise<{ success: boolean; data?: Page; error?: string }>;
   showToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
   refreshAllData: () => Promise<void>;
-  createTask: (task: { title: string; description?: string; priority?: Task['priority']; assignedTo?: string | null; dueAt?: string | null; sourceType?: Task['sourceType']; sourceId?: string | null }) => Promise<boolean>;
-  updateTask: (id: string, patch: Partial<Task>) => Promise<boolean>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
-const mapTask = (t: any): Task => ({
-  id: t.id,
-  title: t.title,
-  description: t.description,
-  status: t.status,
-  priority: t.priority,
-  assignedTo: t.assigned_to,
-  dueAt: t.due_at,
-  sourceType: t.source_type,
-  sourceId: t.source_id,
-  completionNotes: t.completion_notes,
-  completedAt: t.completed_at,
-  createdBy: t.created_by,
-  createdAt: t.created_at,
-  updatedAt: t.updated_at,
-});
+async function fetchJson<T>(url: string, init?: RequestInit, fallback: T = null as unknown as T): Promise<T> {
+  try {
+    const res = await fetch(url, init);
+    if (!res.ok) {
+      console.warn(`[API] Resposta com status ${res.status} de ${url}`);
+      return fallback;
+    }
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      console.warn(`[API] Resposta de ${url} não é JSON (${contentType})`);
+      return fallback;
+    }
+    return (await res.json()) as T;
+  } catch (err) {
+    console.warn(`[API] Falha ao consultar ${url}:`, err);
+    return fallback;
+  }
+}
+
+const DEFAULT_SETTINGS: SiteSettings = {
+  site_mode: 'campaign',
+  candidate_title: 'Candidato a Deputado Estadual',
+  mandate_title: 'Deputado Estadual',
+  institutional_title: 'Carlos Búrigo',
+  candidate_name: 'Carlos Búrigo',
+  electoral_number: '15140',
+  party_number: '15',
+  party_name: 'MDB — Movimento Democrático Brasileiro',
+  campaign_slogan: 'Trabalho sério, presença e resultados reais para o Rio Grande.',
+  campaign_cnpj: '56.789.123/0001-45',
+  campaign_coalition: 'Coligação Pra Frente Rio Grande (MDB / Federação)',
+  official_election_date: '2026-10-04',
+  gabinete_address_poa: 'Assembleia Legislativa do RS — Praça Marechal Deodoro, 101, Gabinete 502, Centro Histórico, Porto Alegre - RS',
+  gabinete_address_caxias: 'Escritório Regional Serra Gaúcha — Rua Sinimbu, 1870, Sala 402, Caxias do Sul - RS',
+  gabinete_phone: '(51) 3210-2000',
+  gabinete_whatsapp: '(54) 99915-1515',
+  gabinete_email: 'carlos.burigo@al.rs.gov.br',
+  social_instagram: 'https://www.instagram.com/carlosburigo15/',
+  social_facebook: 'https://www.facebook.com/CBurigo/?locale=pt_BR',
+  social_youtube: 'https://www.youtube.com/@carlosburigo',
+  social_whatsapp: 'https://wa.me/5554999151515',
+  seo_default_title: 'Deputado Carlos Búrigo | Canal Oficial do Gabinete',
+  seo_default_description: 'Plataforma oficial de comunicação institucional, atendimento de demandas do cidadão e acompanhamento legislativo.',
+  privacy_policy_text: 'Em conformidade com a Lei Geral de Proteção de Dados (LGPD - Lei 13.709/2018), os dados fornecidos no Portal do Cidadão são protegidos sob sigilo funcional.',
+  mandate_slogan: 'Responsabilidade fiscal, apoio ao setor produtivo e defesa contínua dos municípios da Serra Gaúcha e de todo o Estado.',
+  bio_highlights: [
+    'Prefeito de São José dos Ausentes por dois mandatos',
+    '9 anos Secretário da Fazenda de Caxias do Sul',
+    'Secretário-Geral e Planejamento do Governo do RS',
+    'Autor da Lei da Silvicultura (PL 332/2025)',
+  ],
+  cta_title: 'Fale com o Gabinete de Carlos Búrigo',
+  cta_subtitle: 'Apresente demandas para o seu bairro, solicitações de apoio hospitalar ou sugestões para novos projetos de lei com protocolo rastreável.',
+  gabinete_phone_caxias: '(54) 3218-1200',
+};
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const ui = useAppUi();
-  const [settings, setSettings] = useState<SiteSettings | null>(null);
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [settings, setSettings] = useState<SiteSettings>(DEFAULT_SETTINGS);
+  const [currentUser, setCurrentUser] = useState<User>({
+    id: 'usr-1',
+    name: 'Carlos Búrigo',
+    email: 'carlos.burigo@al.rs.gov.br',
+    role: 'ADMIN',
+    cargo: 'Deputado Estadual / Titular',
+  });
   const [allUsers, setAllUsers] = useState<User[]>([]);
-  const [authReady, setAuthReady] = useState(false);
+  const [currentView, setCurrentView] = useState<string>('home');
+  const [selectedNewsSlug, setSelectedNewsSlug] = useState<string | null>(null);
+  const [trackingProtocol, setTrackingProtocol] = useState<string | null>(null);
+  const [isProtocolModalOpen, setIsProtocolModalOpen] = useState(false);
 
   const [pages, setPages] = useState<Page[]>([]);
-  const [adminPages, setAdminPages] = useState<Page[]>([]);
   const [news, setNews] = useState<News[]>([]);
   const [events, setEvents] = useState<EventItem[]>([]);
   const [projects, setProjects] = useState<ProjectItem[]>([]);
@@ -124,9 +143,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [media, setMedia] = useState<MediaItem[]>([]);
   const [demands, setDemands] = useState<Demand[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [legislativeItems, setLegislativeItems] = useState<PublicLegislativeItemDto[]>([]);
-  const [documents, setDocuments] = useState<PublicDocumentDto[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -135,19 +151,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const showToast = useCallback((msg: string, type: 'success' | 'error' | 'info' = 'info') => {
     setToastMessage(msg);
     setToastType(type);
-    setTimeout(() => setToastMessage(null), 4000);
+    setTimeout(() => {
+      setToastMessage(null);
+    }, 4000);
   }, []);
 
   const refreshAllData = useCallback(async () => {
     try {
-      const session = (await getSupabaseClient()).auth.getSession ? (await (await getSupabaseClient()).auth.getSession()).data.session : null;
-      const accessToken = session?.access_token;
-      const authHeaders = accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
       const [
         settingsRes,
         authRes,
         pagesRes,
-        adminPagesRes,
         newsRes,
         eventsRes,
         projectsRes,
@@ -155,159 +169,80 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         munRes,
         videosRes,
         mediaRes,
-        legislativeRes,
-        documentsRes,
         demandsRes,
         logsRes,
-        tasksRes,
       ] = await Promise.all([
-        fetch('/api/settings').then((r) => r.json()),
-        accessToken ? fetch('/api/auth/me', { headers: authHeaders }).then((r) => r.ok ? r.json() : ({ user: null, allUsers: [] })) : Promise.resolve({ user: null, allUsers: [] }),
-        fetch('/api/pages').then((r) => r.json()),
-        accessToken ? fetch('/api/admin/pages', { headers: authHeaders }).then((r) => r.ok ? r.json() : []) : Promise.resolve([]),
-        fetch('/api/news').then((r) => r.json()),
-        fetch('/api/agenda?admin=true').then((r) => r.json()),
-        fetch('/api/projects').then((r) => r.json()),
-        fetch('/api/results').then((r) => r.json()),
-        fetch('/api/municipalities').then((r) => r.json()),
-        fetch('/api/videos').then((r) => r.json()),
-        fetch('/api/media').then((r) => r.json()),
-        fetch('/api/legislative').then((r) => r.json()),
-        fetch('/api/documents').then((r) => r.json()),
-        accessToken ? fetch('/api/demands', { headers: authHeaders }).then((r) => r.ok ? r.json() : []) : Promise.resolve([]),
-        accessToken ? fetch('/api/audit-logs', { headers: authHeaders }).then((r) => r.ok ? r.json() : []) : Promise.resolve([]),
-        accessToken ? fetch('/api/tasks', { headers: authHeaders }).then((r) => r.ok ? r.json() : []) : Promise.resolve([]),
+        fetchJson<SiteSettings>('/api/settings'),
+        fetchJson<{ user: User; allUsers: User[] }>('/api/auth/me', { headers: { 'x-user-id': currentUser.id } }),
+        fetchJson<Page[]>('/api/pages', undefined, []),
+        fetchJson<News[]>('/api/news?admin=true', undefined, []),
+        fetchJson<EventItem[]>('/api/agenda?admin=true', undefined, []),
+        fetchJson<ProjectItem[]>('/api/projects', undefined, []),
+        fetchJson<ResultItem[]>('/api/results', undefined, []),
+        fetchJson<Municipality[]>('/api/municipalities', undefined, []),
+        fetchJson<VideoItem[]>('/api/videos', undefined, []),
+        fetchJson<MediaItem[]>('/api/media', undefined, []),
+        fetchJson<Demand[]>('/api/demands', undefined, []),
+        fetchJson<AuditLog[]>('/api/audit-logs', undefined, []),
       ]);
 
       if (settingsRes) setSettings(settingsRes);
-      if (authRes?.user) setCurrentUser(authRes.user);
       if (authRes?.allUsers) setAllUsers(authRes.allUsers);
+      if (authRes?.user) setCurrentUser(authRes.user);
       if (Array.isArray(pagesRes)) setPages(pagesRes);
-      if (Array.isArray(adminPagesRes)) setAdminPages(adminPagesRes);
       if (Array.isArray(newsRes)) setNews(newsRes);
       if (Array.isArray(eventsRes)) setEvents(eventsRes);
       if (Array.isArray(projectsRes)) setProjects(projectsRes);
       if (Array.isArray(resultsRes)) setResults(resultsRes);
       if (Array.isArray(munRes)) setMunicipalities(munRes);
-      if (Array.isArray(videosRes)) setVideos(videosRes.map((video: any) => ({
-        id: video.id,
-        title: video.title,
-        description: video.description,
-        url: video.url,
-        platform: video.platform,
-        category: video.category,
-        date: video.publishedAt || video.createdAt,
-        thumbnail: video.thumbnailUrl || '',
-        featured: Boolean(video.featured),
-        status: video.status,
-        sourceName: video.sourceName,
-        verificationStatus: video.verificationStatus,
-        rightsStatus: video.rightsStatus,
-      })));
+      if (Array.isArray(videosRes)) setVideos(videosRes);
       if (Array.isArray(mediaRes)) setMedia(mediaRes);
-      if (Array.isArray(legislativeRes)) setLegislativeItems(legislativeRes);
-      if (Array.isArray(documentsRes)) setDocuments(documentsRes);
       if (Array.isArray(demandsRes)) setDemands(demandsRes);
       if (Array.isArray(logsRes)) setAuditLogs(logsRes);
-      if (Array.isArray(tasksRes)) setTasks(tasksRes.map((t: any) => ({ id: t.id, title: t.title, description: t.description, status: t.status, priority: t.priority, assignedTo: t.assigned_to, dueAt: t.due_at, sourceType: t.source_type, sourceId: t.source_id, completionNotes: t.completion_notes, completedAt: t.completed_at, createdBy: t.created_by, createdAt: t.created_at, updatedAt: t.updated_at })));
     } catch (err) {
       console.error('Error loading data:', err);
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [currentUser.id]);
 
   useEffect(() => {
     refreshAllData();
   }, [refreshAllData]);
 
-  const getAuthHeaders = async (includeContentType = false): Promise<Record<string, string>> => {
-    const client = await getSupabaseClient();
-    const { data } = await client.auth.getSession();
-    if (!data.session?.access_token) throw new Error('Sessão não autenticada');
-    return {
-      ...(includeContentType ? { 'Content-Type': 'application/json' } : {}),
-      Authorization: `Bearer ${data.session.access_token}`,
-    };
-  };
-
-  const createTask = async (task: { title: string; description?: string; priority?: Task['priority']; assignedTo?: string | null; dueAt?: string | null; sourceType?: Task['sourceType']; sourceId?: string | null }): Promise<boolean> => {
+  const switchUser = async (userId: string) => {
     try {
-      const res = await fetch('/api/tasks', { method: 'POST', headers: await getAuthHeaders(true), body: JSON.stringify(task) });
-      const data = await res.json().catch(() => null);
-      if (!res.ok) { showToast(data?.error || 'Falha ao criar tarefa', 'error'); return false; }
-      setTasks(prev => [mapTask(data), ...prev]);
-      showToast('Tarefa criada.', 'success');
-      return true;
-    } catch { showToast('Erro de comunicação ao criar tarefa', 'error'); return false; }
-  };
-
-  const updateTask = async (id: string, patch: Partial<Task>): Promise<boolean> => {
-    try {
-      const body: Record<string, unknown> = {};
-      if (patch.title !== undefined) body.title = patch.title;
-      if (patch.description !== undefined) body.description = patch.description;
-      if (patch.status !== undefined) body.status = patch.status;
-      if (patch.priority !== undefined) body.priority = patch.priority;
-      if (patch.assignedTo !== undefined) body.assignedTo = patch.assignedTo;
-      if (patch.dueAt !== undefined) body.dueAt = patch.dueAt;
-      if (patch.sourceType !== undefined) body.sourceType = patch.sourceType;
-      if (patch.sourceId !== undefined) body.sourceId = patch.sourceId;
-      if (patch.completionNotes !== undefined) body.completionNotes = patch.completionNotes;
-      if (patch.completedAt !== undefined) body.completedAt = patch.completedAt;
-      const res = await fetch('/api/tasks/' + id, { method: 'PUT', headers: await getAuthHeaders(true), body: JSON.stringify(body) });
-      const data = await res.json().catch(() => null);
-      if (!res.ok) { showToast(data?.error || 'Falha ao atualizar tarefa', 'error'); return false; }
-      setTasks(prev => prev.map(t => t.id === id ? mapTask(data) : t));
-      return true;
-    } catch { showToast('Erro de comunicação ao atualizar tarefa', 'error'); return false; }
-  };
-
-  const signOut = async () => {
-    try {
-      const client = await getSupabaseClient();
-      await client.auth.signOut();
-    } finally {
-      setCurrentUser(null);
-      setAllUsers([]);
+      const res = await fetch('/api/auth/switch-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId }),
+      });
+      if (!res.ok) {
+        showToast('Falha ao alternar usuário', 'error');
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      if (data?.user) {
+        setCurrentUser(data.user);
+        showToast(`Sessão alterada para: ${data.user.name} (${data.user.role})`, 'info');
+      }
+    } catch (err) {
+      showToast('Falha ao alternar usuário', 'error');
     }
   };
-
-  useEffect(() => {
-    let mounted = true;
-    let unsubscribe: (() => void) | undefined;
-    (async () => {
-      try {
-        const client = await getSupabaseClient();
-        const { data } = client.auth.onAuthStateChange((_event, session) => {
-          if (!mounted) return;
-          if (!session) {
-            setCurrentUser(null);
-            setAllUsers([]);
-          } else {
-            void refreshAllData();
-          }
-          setAuthReady(true);
-        });
-        unsubscribe = () => data.subscription.unsubscribe();
-        await refreshAllData();
-      } catch (error) {
-        console.error('Error initializing authentication:', error);
-        if (mounted) setAuthReady(true);
-      }
-    })();
-    return () => { mounted = false; unsubscribe?.(); };
-  }, [refreshAllData]);
 
   const updateSettings = async (newSettings: Partial<SiteSettings>): Promise<boolean> => {
     try {
       const res = await fetch('/api/settings', {
         method: 'PUT',
-        headers: await getAuthHeaders(true),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-id': currentUser.id,
+        },
         body: JSON.stringify(newSettings),
       });
       if (!res.ok) {
-        const err = await res.json();
+        const err = await res.json().catch(() => ({}));
         showToast(err.error || 'Erro ao atualizar configurações', 'error');
         return false;
       }
@@ -326,134 +261,102 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     pageData: {
       blocks?: PageBlock[];
       title?: string;
-      slug?: string;
       description?: string;
-      seoTitle?: string;
-      seoDescription?: string;
       status?: 'publicado' | 'rascunho';
       publish?: boolean;
       note?: string;
     }
   ): Promise<{ success: boolean; data?: Page; error?: string }> => {
+    console.log('[AppContext:updatePage] Committing page update to backend for id:', pageId, {
+      title: pageData.title,
+      blockCount: pageData.blocks?.length,
+      publish: pageData.publish,
+      status: pageData.status,
+    });
+
     try {
-      const res = await fetch(`/api/admin/pages/${pageId}`, {
+      const res = await fetch(`/api/pages/${pageId}`, {
         method: 'PUT',
-        headers: await getAuthHeaders(true),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-id': currentUser.id,
+        },
         body: JSON.stringify(pageData),
       });
-      const json = await res.json().catch(() => ({}));
+
       if (!res.ok) {
-        const errMsg = json.error || `Erro HTTP ${res.status} ao atualizar página`;
+        const errJson = await res.json().catch(() => ({}));
+        const errMsg = errJson.error || `Erro HTTP ${res.status} ao atualizar página`;
+        console.error('[AppContext:updatePage] Server returned error:', errMsg);
         showToast(errMsg, 'error');
         return { success: false, error: errMsg };
       }
-      const updatedPage: Page = json;
-      setAdminPages((prev) => prev.some((p) => p.id === updatedPage.id) ? prev.map((p) => p.id === updatedPage.id ? updatedPage : p) : [updatedPage, ...prev]);
-      if (updatedPage.status === 'publicado') {
-        setPages((prev) => prev.some((p) => p.id === updatedPage.id) ? prev.map((p) => p.id === updatedPage.id ? updatedPage : p) : [updatedPage, ...prev]);
-      }
-      showToast(pageData.publish ? 'Página publicada com sucesso.' : 'Rascunho salvo no Supabase.', 'success');
+
+      const updatedPage: Page = await res.json();
+      console.log('[AppContext:updatePage] Successfully received updated page from server:', {
+        id: updatedPage.id,
+        title: updatedPage.title,
+        blockCount: updatedPage.blocks?.length,
+        versionCount: updatedPage.versions?.length,
+        status: updatedPage.status,
+        updatedAt: updatedPage.updatedAt,
+      });
+
+      // Synchronize data provider's `pages` state immediately with new reference
+      setPages((prevPages) => {
+        const found = prevPages.some((p) => p.id === updatedPage.id || p.slug === updatedPage.slug);
+        if (found) {
+          return prevPages.map((p) => (p.id === updatedPage.id || p.slug === updatedPage.slug ? updatedPage : p));
+        }
+        return [...prevPages, updatedPage];
+      });
+
+      showToast(
+        pageData.publish
+          ? 'Página publicada com sucesso! Alterações ao vivo no site.'
+          : 'Alterações da página salvas com sucesso no servidor!',
+        'success'
+      );
       return { success: true, data: updatedPage };
     } catch (err: any) {
       const errMsg = err?.message || 'Erro de conexão com o servidor ao salvar página';
+      console.error('[AppContext:updatePage] Network/exception error updating page:', err);
       showToast(errMsg, 'error');
       return { success: false, error: errMsg };
     }
   };
 
-  const createPage = async (pageData: {
-    title: string;
-    slug: string;
-    description?: string;
-    seoTitle?: string;
-    seoDescription?: string;
-    ogImageUrl?: string;
-    status?: 'publicado' | 'rascunho';
-    blocks?: PageBlock[];
-    publish?: boolean;
-    note?: string;
-  }): Promise<{ success: boolean; data?: Page; error?: string }> => {
-    try {
-      const res = await fetch('/api/admin/pages', {
-        method: 'POST',
-        headers: await getAuthHeaders(true),
-        body: JSON.stringify(pageData),
-      });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        const errMsg = json.error || `Erro HTTP ${res.status} ao criar página`;
-        showToast(errMsg, 'error');
-        return { success: false, error: errMsg };
-      }
-      const page: Page = json;
-      setAdminPages((prev) => [page, ...prev]);
-      if (page.status === 'publicado') setPages((prev) => [page, ...prev]);
-      showToast('Página criada no Supabase.', 'success');
-      return { success: true, data: page };
-    } catch (err: any) {
-      const errMsg = err?.message || 'Erro de conexão ao criar página';
-      showToast(errMsg, 'error');
-      return { success: false, error: errMsg };
-    }
+  const openNewsDetail = (slug: string) => {
+    setSelectedNewsSlug(slug);
+    setCurrentView('noticia-detalhe');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const rollbackPage = async (pageId: string, versionId: string): Promise<{ success: boolean; data?: Page; error?: string }> => {
-    try {
-      const res = await fetch(`/api/admin/pages/${pageId}/rollback`, {
-        method: 'POST',
-        headers: await getAuthHeaders(true),
-        body: JSON.stringify({ versionId }),
-      });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        const errMsg = json.error || 'Falha ao restaurar versão';
-        showToast(errMsg, 'error');
-        return { success: false, error: errMsg };
-      }
-      const page: Page = json;
-      setAdminPages((prev) => prev.map((p) => p.id === page.id ? page : p));
-      if (page.status === 'publicado') setPages((prev) => prev.map((p) => p.id === page.id ? page : p));
-      showToast('Versão restaurada.', 'success');
-      return { success: true, data: page };
-    } catch (err: any) {
-      const errMsg = err?.message || 'Erro de conexão ao restaurar versão';
-      showToast(errMsg, 'error');
-      return { success: false, error: errMsg };
-    }
+  const openProtocolModal = (protocol?: string) => {
+    if (protocol) setTrackingProtocol(protocol);
+    setIsProtocolModalOpen(true);
   };
 
-  const switchUser = async (userId: string): Promise<boolean> => {
-    try {
-      const res = await fetch('/api/auth/switch-user', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.user) setCurrentUser(data.user);
-        showToast('Usuário alternado com sucesso.', 'success');
-        return true;
-      }
-      return false;
-    } catch {
-      return false;
-    }
+  const closeProtocolModal = () => {
+    setIsProtocolModalOpen(false);
+    setTrackingProtocol(null);
   };
 
-  const openCitizenModal = (_initialSubject?: string) => {
-    ui.openProtocolModal();
-  };
+  const openCitizenModal = useCallback((_category?: string) => {
+    setIsProtocolModalOpen(true);
+  }, []);
 
   return (
     <AppContext.Provider
       value={{
-        ...ui,
         settings,
         currentUser,
         allUsers,
+        currentView,
+        selectedNewsSlug,
+        trackingProtocol,
+        isProtocolModalOpen,
         pages,
-        adminPages,
         news,
         events,
         projects,
@@ -463,27 +366,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         media,
         demands,
         auditLogs,
-        tasks,
-        legislativeItems,
-        documents,
         isLoading,
         toastMessage,
         toastType,
-        signOut,
-        switchUser,
+        setCurrentView,
+        openNewsDetail,
+        openProtocolModal,
         openCitizenModal,
-        authReady,
+        closeProtocolModal,
+        switchUser,
         updateSettings,
         updatePage,
-        createPage,
-        rollbackPage,
         showToast,
         refreshAllData,
-        createTask,
-        updateTask,
       }}
     >
       {children}
+      {/* Toast Notification Container */}
       {toastMessage && (
         <div
           id="global-toast"
@@ -496,7 +395,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }`}
         >
           <span>{toastMessage}</span>
-          <button onClick={() => setToastMessage(null)} className="text-stone-400 hover:text-white text-xs font-bold px-1">
+          <button
+            onClick={() => setToastMessage(null)}
+            className="text-stone-400 hover:text-white text-xs font-bold px-1"
+          >
             ✕
           </button>
         </div>

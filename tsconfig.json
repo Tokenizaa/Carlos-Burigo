@@ -21,14 +21,20 @@
       ]
     },
     "allowImportingTsExtensions": true,
-    "noEmit": true,
-    "resolveJsonModule": true
+    "noEmit": true
   },
   "include": [
-    "src"
+    "src",
+    "server/db.ts",
+    "server.ts",
+    "api",
+    "vite.config.ts"
   ],
   "exclude": [
+    "node_modules",
+    "dist",
+    "dist-cf",
     "src/worker.ts",
-    "node_modules"
+    "server/supabase.ts"
   ]
 }

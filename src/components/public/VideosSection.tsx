@@ -196,28 +196,26 @@ export const VideosSection: React.FC = () => {
 
               <div className="aspect-video bg-black flex items-center justify-center">
                 {(() => {
-                  const targetUrl = selectedVideo.videoUrl || selectedVideo.url || '';
-                  if (targetUrl.includes('youtube') || targetUrl.includes('youtu.be')) {
-                    const embedId = targetUrl.includes('v=')
-                      ? targetUrl.split('v=')[1]?.split('&')[0]
-                      : targetUrl.split('/').pop();
-                    return (
-                      <iframe
-                        src={`https://www.youtube-nocookie.com/embed/${embedId}?autoplay=1`}
-                        title={selectedVideo.title}
-                        className="w-full h-full border-0"
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                        allowFullScreen
-                      />
-                    );
-                  }
-                  return (
+                  const currentVideoUrl = selectedVideo.videoUrl || selectedVideo.url || '';
+                  return currentVideoUrl.includes('youtube') || currentVideoUrl.includes('youtu.be') ? (
+                    <iframe
+                      src={`https://www.youtube-nocookie.com/embed/${
+                        currentVideoUrl.includes('v=')
+                          ? currentVideoUrl.split('v=')[1]?.split('&')[0]
+                          : currentVideoUrl.split('/').pop()
+                      }?autoplay=1`}
+                      title={selectedVideo.title}
+                      className="w-full h-full border-0"
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                      allowFullScreen
+                    />
+                  ) : (
                     <div className="p-8 text-center space-y-4">
                       <p className="text-stone-300 text-sm">
                         Este vídeo está hospedado na plataforma oficial {selectedVideo.platform}.
                       </p>
                       <a
-                        href={targetUrl}
+                        href={currentVideoUrl}
                         target="_blank"
                         rel="noreferrer"
                         className="inline-block bg-[#00A550] text-white px-6 py-3 rounded-[2px] text-sm font-bold uppercase tracking-wider hover:bg-emerald-600 transition-colors"

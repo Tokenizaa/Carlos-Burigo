@@ -1,56 +1,10 @@
-# Dependencies
 node_modules/
-.pnp
-.pnp.js
-
-# Build outputs
+build/
 dist/
 dist-cf/
-.build/
-
-# Environment variables
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-
-# Logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# IDEs and editors
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Backup and archive files
-*.zip
-*.tar
-*.tar.gz
-
-# Documents that might be large
-documents/**/*.pdf
-
-# Opencode artifacts
-.opencode/
-
-# Test coverage
+.wrangler/
 coverage/
-.lcov*
-
-# Database files
-*.sqlite
-*.sqlite3
-
-# Uploads (if they exist)
-public/uploads/
+.DS_Store
+*.log
+.env*
+!.env.example

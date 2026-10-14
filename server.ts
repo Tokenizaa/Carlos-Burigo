@@ -1,12 +1,11 @@
-import express from 'express';
-import type { Request, Response } from 'express';
+import express, { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
-import { db } from './server/db.ts';
-import type { User } from './src/types.ts';
+import { db } from './server/db.js';
+import { User } from './src/types.js';
 
 export const app = express();
-const PORT = Number(process.env.PORT || 3000);
+const PORT = 3000;
 
 // Increase payload limit for media uploads and rich texts
 app.use(express.json({ limit: '25mb' }));
@@ -223,12 +222,12 @@ app.use('/api', (_req: Request, res: Response) => {
   res.status(404).json({ error: 'Endpoint da API não encontrado', notFound: true });
 });
 
-app.get('/robots.txt', (_req, res) => {
+app.get('/robots.txt', (_req: Request, res: Response) => {
   const robotsPath = path.join(process.cwd(), 'public', 'robots.txt');
   if (fs.existsSync(robotsPath)) res.type('text/plain').sendFile(robotsPath);
   else res.type('text/plain').send("User-agent: *\nAllow: /\nDisallow: /admin\nSitemap: https://www.carlosburigo.com.br/sitemap.xml");
 });
-app.get('/sitemap.xml', (_req, res) => {
+app.get('/sitemap.xml', (_req: Request, res: Response) => {
   const sitemapPath = path.join(process.cwd(), 'public', 'sitemap.xml');
   if (fs.existsSync(sitemapPath)) res.type('application/xml').sendFile(sitemapPath);
   else res.status(404).send('Not found');
@@ -240,18 +239,9 @@ export async function start() {
     const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
     app.use(vite.middlewares);
   } else {
-    const distPath = fs.existsSync(path.join(process.cwd(), 'dist'))
-      ? path.join(process.cwd(), 'dist')
-      : path.join(process.cwd(), 'dist-cf');
+    const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.use((_req, res) => {
-      const indexPath = path.join(distPath, 'index.html');
-      if (fs.existsSync(indexPath)) {
-        res.sendFile(indexPath);
-      } else {
-        res.send('<!DOCTYPE html><html><head><title>Carregando...</title></head><body>Carregando aplicação...</body></html>');
-      }
-    });
+    app.use((_req, res) => res.sendFile(path.join(distPath, 'index.html')));
   }
   app.listen(PORT, '0.0.0.0', () => console.log(`Plataforma Carlos Búrigo rodando em http://localhost:${PORT}`));
 }

@@ -22,7 +22,7 @@ export interface User {
   onboardingCompletedAt?: string | null;
 }
 
-export type SiteMode = 'campaign' | 'mandate' | 'institutional' | 'transicao' | 'campanha' | 'mandato';
+export type SiteMode = 'campaign' | 'mandate' | 'institutional';
 
 export interface SiteSettings {
   candidate_title: string;
@@ -47,7 +47,7 @@ export interface SiteSettings {
   cta_title?: string;
   cta_subtitle?: string;
   gabinete_phone_caxias?: string;
-  site_mode: string; // 'campaign' | 'mandate' | 'institutional'
+  site_mode: SiteMode | string;
   electoral_number: string;
   party_number: string;
   party_name: string;
@@ -146,16 +146,13 @@ export interface News {
   category: string;
   municipality?: string;
   date: string;
+  publishDate?: string;
   author: string;
   status: 'rascunho' | 'publicado' | 'arquivado';
   featured: boolean;
   seoTitle?: string;
   seoDescription?: string;
   socialImage?: string;
-  publishDate?: string;
-  sourceName?: string;
-  imageCredit?: string;
-  sourceUrl?: string;
 }
 
 export interface EventItem {
@@ -217,7 +214,6 @@ export interface MediaItem {
   description?: string;
   credit?: string;
   photographer?: string;
-  sourceName?: string;
   category: 'fotos' | 'documentos' | 'banners' | 'campanha';
   url: string;
   size: number;
@@ -334,6 +330,7 @@ export interface AuditLog {
   action: string;
   entityType: string;
   entityId: string;
+  entity?: string;
   details: string;
   timestamp: string;
 }

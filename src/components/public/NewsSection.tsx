@@ -109,7 +109,7 @@ export const NewsSection: React.FC<{ limit?: number; showHeader?: boolean }> = (
               <div className="flex items-center gap-2 text-xs font-bold text-[#00A550] uppercase tracking-[0.12em]">
                 <span>{featuredItem.category}</span>
                 <span className="text-stone-300">•</span>
-                <span className="text-stone-500 font-semibold">{featuredItem.publishDate}</span>
+                <span className="text-stone-500 font-semibold">{featuredItem.publishDate || featuredItem.date}</span>
                 {featuredItem.municipality && (
                   <>
                     <span className="text-stone-300">•</span>
@@ -171,7 +171,7 @@ export const NewsSection: React.FC<{ limit?: number; showHeader?: boolean }> = (
                       <div className="flex items-center gap-2 text-xs font-semibold text-stone-500">
                         <span className="text-[#00A550] font-bold uppercase tracking-wider">{item.category}</span>
                         <span>•</span>
-                        <span>{item.publishDate}</span>
+                        <span>{item.publishDate || item.date}</span>
                       </div>
 
                       <h5 className="text-xl font-bold text-stone-900 group-hover:text-[#00A550] transition-colors leading-snug">
