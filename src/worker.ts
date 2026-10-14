@@ -1,0 +1,1800 @@
+import {
+  getPublicAgenda,
+  getPublicMedia,
+  getPublicMunicipalities,
+  getPublicNews,
+  getPublicResults,
+  getPublicSettings,
+  getPlatformSettings,
+  updatePlatformSettings,
+  updateAdminSettings,
+  getPublicVideos,
+  getPublicLegislativeItems,
+  getPublicPages,
+  supabaseAdmin,
+  supabasePublic,
+  configureSupabaseAdmin,
+  normalizeSupabaseUrl,
+  getAdminUserById,
+  getAuthenticatedAdminUser,
+  getAllAdminUsers,
+  bootstrapFirstAdmin,
+  getAdminAuditLogs,
+  createAdminAuditLog,
+  getAdminTasks,
+  createAdminTask,
+  updateAdminTask,
+  deleteAdminTask,
+  getAllDemandsAdmin,
+  updateDemandAdmin,
+  getPublicDocuments,
+  getPublicEvidence,
+  getAdminDocuments,
+  createAdminDocument,
+  getAdminEvidence,
+  updateAdminDocument,
+  getAdminNews,
+  createAdminNews,
+  updateAdminNews,
+  deleteAdminNews,
+  getAdminAgenda,
+  createAdminAgenda,
+  updateAdminAgenda,
+  deleteAdminAgenda,
+  getAdminResults,
+  createAdminResult,
+  updateAdminResult,
+  deleteAdminResult,
+  getAdminMunicipalities,
+  createAdminMunicipality,
+  updateAdminMunicipality,
+  deleteAdminMunicipality,
+  getAdminVideos,
+  createAdminVideo,
+  updateAdminVideo,
+  deleteAdminVideo,
+  updateAdminUserRole,
+  setAdminUserAccess,
+} from '../server/supabase';
+import { mapToPublicMediaDto, mapToPublicVideoDto } from '../server/mappers/publicArchive';
+import {
+  getAdminPages,
+  getAdminPage,
+  createAdminPage,
+  updateAdminPage,
+  rollbackAdminPage,
+} from '../server/pagesAdmin';
+import {
+  getAdminInvites,
+  createAdminInvite,
+  approveAdminInvite,
+  rejectAdminInvite,
+  revokeAdminInvite,
+  renewAdminInvite,
+  acceptAdminInvite,
+} from '../server/invites';
+
+import type { User, UserRole } from '../src/types';
+import type { AdminModule, Permission } from '../src/config/adminPermissions';
+import { getEffectivePermissions, canEffective } from '../server/permissions';
+import { validatePassword } from './lib/passwordValidation';
+import { executeElectoralQuestion } from '../server/electoralIntelligence';
+import {
+  MAIN_CANDIDATE_NUMBER,
+  getElectoralOverview,
+  getElectoralZones,
+  getElectoralSections,
+  getElectoralMunicipality,
+} from '../server/electoralGeography';
+import type { ElectoralQuestionRequest } from './contracts/electoralRuntime';
+
+export interface Env {
+  ASSETS: { fetch(request: Request): Promise<Response> };
+  SUPABASE_URL?: string;
+  SUPABASE_PUBLISHABLE_KEY?: string;
+  SUPABASE_SERVICE_ROLE_KEY?: string;
+}
+
+type JsonHandler = () => Promise<unknown>;
+
+async function respond(fn: JsonHandler, label: string, errorMessage: string): Promise<Response> {
+  try {
+    return Response.json(await fn());
+  } catch (error) {
+    console.error(`[api/${label}]`, error);
+    return Response.json({ error: errorMessage }, { status: 500 });
+  }
+}
+
+async function requireCitizenAuth(request: Request): Promise<{ userId: string; email: string; name?: string } | Response> {
+  const authorization = request.headers.get('authorization') ?? '';
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  if (!match) return Response.json({ error: 'Não autenticado' }, { status: 401 });
+  const { data, error } = await supabaseAdmin.auth.getUser(match[1]);
+  if (error || !data.user) return Response.json({ error: 'Sessão inválida' }, { status: 401 });
+  return {
+    userId: data.user.id,
+    email: data.user.email ?? '',
+    name: typeof data.user.user_metadata?.name === 'string' ? data.user.user_metadata.name : undefined,
+  };
+}
+
+function normalizeBrazilPhone(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  if (digits.startsWith('55')) return `+${digits}`;
+  return `+55${digits}`;
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function requireEffectivePermission(request: Request, module: AdminModule, action: Permission): Promise<{ auth: { userId: string; role: string; user: User } } | Response> {
+  const authResult = await requireAuth(request);
+  if (authResult instanceof Response) return authResult;
+  const allowed = await canEffective(authResult.userId, authResult.role, module, action);
+  if (!allowed) return Response.json({ error: 'Acesso negado para esta permissão.' }, { status: 403 });
+  return { auth: authResult };
+}
+
+function methodNotAllowed(): Response {
+  return Response.json({ error: 'Método não permitido' }, { status: 405 });
+}
+
+// Helper to extract user ID from request headers
+async function requireAuth(request: Request): Promise<{ userId: string; role: string; user: User } | Response> {
+  const authorization = request.headers.get('authorization') ?? '';
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  if (!match) return Response.json({ error: 'Não autenticado' }, { status: 401 });
+  const user = await getAuthenticatedAdminUser(match[1]);
+  if (!user) return Response.json({ error: 'Sessão inválida ou usuário sem perfil de gabinete' }, { status: 401 });
+  return { userId: user.id, role: user.role, user };
+}
+
+// Helper to add security headers
+function addSecurityHeaders(response: Response, isHtml = false): Response {
+  const newHeaders = new Headers(response.headers);
+  newHeaders.set('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://fonts.googleapis.com https://www.google-analytics.com https://www.googletagmanager.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: https: blob:; connect-src 'self' https://wktanxbpijurimdjgone.supabase.co https://*.supabase.co wss://*.supabase.co; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
+  newHeaders.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+  newHeaders.set('X-Frame-Options', 'DENY');
+  newHeaders.set('X-Content-Type-Options', 'nosniff');
+  newHeaders.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  newHeaders.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
+  // Prevent Cloudflare edge caching for HTML (SPA) responses
+  if (isHtml) {
+    newHeaders.set('Cache-Control', 'private, max-age=0, must-revalidate');
+  }
+  const newResponse = new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: newHeaders,
+  });
+  // Control Cloudflare edge caching via cf property
+  if (isHtml) {
+    (newResponse as any).cf = {
+      cacheTtl: 0,
+      cacheEverything: false,
+      cacheKeys: ['host'],
+    };
+  }
+  return newResponse;
+}
+
+// Helper to extract path parameters
+function extractPathParams(pattern: string, pathname: string): Record<string, string> | null {
+  const patternParts = pattern.split('/');
+  const pathnameParts = pathname.split('/');
+  
+  if (patternParts.length !== pathnameParts.length) {
+    return null;
+  }
+  
+  const params: Record<string, string> = {};
+  
+  for (let i = 0; i < patternParts.length; i++) {
+    const patternPart = patternParts[i];
+    const pathnamePart = pathnameParts[i];
+    
+    if (patternPart.startsWith(':') && patternPart.length > 1) {
+      // This is a parameter
+      const paramName = patternPart.slice(1);
+      params[paramName] = pathnamePart;
+    } else if (patternPart !== pathnamePart) {
+      // Literal mismatch
+      return null;
+    }
+  }
+  
+  return params;
+}
+
+let runtimeEnv: Env | null = null;
+
+const routeHandlers: Record<string, (request: Request) => Promise<Response>> = {
+  '/api/auth/bootstrap-status': async (request) => {
+    if (request.method !== 'GET') return methodNotAllowed();
+    try {
+      const { data, error } = await supabaseAdmin
+        .from('user_roles')
+        .select('user_id')
+        .eq('role', 'ADMIN')
+        .limit(1);
+      if (error) throw error;
+      return Response.json({ available: (data ?? []).length === 0 });
+    } catch (error) {
+      console.error('[api/auth/bootstrap-status]', error);
+      return Response.json({ error: 'Não foi possível verificar o primeiro acesso.' }, { status: 500 });
+    }
+  },
+  '/api/auth/bootstrap-admin': async (request) => {
+if (request.method !== 'POST') return methodNotAllowed();
+     try {
+       const body = await request.json();
+       const name = typeof body?.name === 'string' ? body.name : '';
+       const cargo = typeof body?.cargo === 'string' ? body.cargo : '';
+       const email = typeof body?.email === 'string' ? body.email : '';
+       const password = typeof body?.password === 'string' ? body.password : '';
+       const passwordConfirmation = typeof body?.passwordConfirmation === 'string' ? body.passwordConfirmation : '';
+       if (password !== passwordConfirmation) return Response.json({ error: 'As senhas não coincidem.' }, { status: 400 });
+       
+       const passwordValidation = validatePassword(password);
+       if (!passwordValidation.valid) return Response.json({ error: passwordValidation.error }, { status: 400 });
+       
+       const user = await bootstrapFirstAdmin({ name, cargo, email, password });
+      return Response.json({ user }, { status: 201 });
+    } catch (error) {
+      console.error('[api/auth/bootstrap-admin]', error);
+      return Response.json({ error: error?.message || 'Não foi possível criar o administrador principal.' }, { status: 400 });
+    }
+  },
+  '/api/auth/config': async (request) => {
+    if (request.method !== 'GET') return methodNotAllowed();
+    return Response.json({
+      url: normalizeSupabaseUrl(runtimeEnv?.SUPABASE_URL ?? process.env.SUPABASE_URL),
+      publishableKey: runtimeEnv?.SUPABASE_PUBLISHABLE_KEY ?? process.env.SUPABASE_PUBLISHABLE_KEY ?? 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndrdGFueGJwaWp1cmltZGpnb25lIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk1MDU1NzgsImV4cCI6MjEwNTA4MTU3OH0.QtH4ww22HfLuskuoKCTHcCAth9jKI6p6nDR_LiKe80M',
+    });
+  },
+  '/api/auth/me': async (request) => {
+    if (request.method !== 'GET') return methodNotAllowed();
+    try {
+      const auth = await requireAuth(request);
+      if (auth instanceof Response) return auth;
+      
+      // Get the admin user details
+      const adminUser = await getAdminUserById(auth.userId);
+      if (!adminUser) {
+        return Response.json({ error: 'Usuário não encontrado' }, { status: 404 });
+      }
+      
+      // Get all admin users for the frontend (if needed)
+      const allUsers = await getAllAdminUsers();
+      
+      return Response.json({
+        user: adminUser,
+        allUsers: allUsers || []
+      });
+    } catch (error) {
+      console.error('[api/auth/me]', error);
+      return Response.json({ error: 'Falha ao obter informações do usuário' }, { status: 500 });
+    }
+  },
+  '/api/admin/electoral/investigations': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (!(await canEffective(authResult.userId, authResult.role, 'inteligencia-eleitoral', 'view'))) {
+      return Response.json({ error: 'Acesso negado' }, { status: 403 });
+    }
+
+    const columns = 'id,title,context,messages,summary,next_steps,status,created_at,updated_at';
+    if (request.method === 'GET') {
+      const { data, error } = await supabaseAdmin
+        .from('electoral_investigations')
+        .select(columns)
+        .eq('created_by', authResult.userId)
+        .order('updated_at', { ascending: false })
+        .limit(30);
+      if (error) {
+        console.error('[api/admin/electoral/investigations]', error);
+        return Response.json({ error: 'Não foi possível carregar o histórico de investigações.' }, { status: 500 });
+      }
+      return Response.json({ investigations: data ?? [] });
+    }
+
+    if (request.method !== 'POST') return methodNotAllowed();
+
+    try {
+      const body = await request.json();
+      const title = typeof body?.title === 'string' ? body.title.trim().slice(0, 160) : '';
+      const context = body?.context && typeof body.context === 'object' && !Array.isArray(body.context) ? body.context : null;
+      const rawMessages = Array.isArray(body?.messages) ? body.messages.slice(-80) : null;
+      const id = typeof body?.id === 'string' ? body.id : null;
+      if (!title || !context || !rawMessages) {
+        return Response.json({ error: 'title, context e messages são obrigatórios.' }, { status: 400 });
+      }
+      const contextIsValid =
+        [2018, 2022, 2026].includes(Number(context.year)) &&
+        Number.isInteger(Number(context.candidateNumber)) &&
+        Number(context.candidateNumber) > 0 &&
+        [2018, 2022, 2026].includes(Number(context.fromYear)) &&
+        [2018, 2022, 2026].includes(Number(context.toYear)) &&
+        context.uf === 'RS' &&
+        context.office === 'Deputado Estadual' &&
+        Number(context.round) === 1;
+      if (!contextIsValid) {
+        return Response.json({ error: 'O contexto eleitoral da investigação é inválido para o escopo habilitado.' }, { status: 400 });
+      }
+      const messages = rawMessages.filter((message) =>
+        message &&
+        (message.role === 'user' || message.role === 'assistant') &&
+        typeof message.id === 'string' &&
+        typeof message.content === 'string' &&
+        message.content.length <= 5000 &&
+        typeof message.createdAt === 'string'
+      );
+      if (messages.length !== rawMessages.length || messages.length === 0) {
+        return Response.json({ error: 'A lista de mensagens contém itens inválidos.' }, { status: 400 });
+      }
+
+      const values = {
+        title,
+        context,
+        messages,
+        summary: typeof body?.summary === 'string' ? body.summary.slice(0, 4000) : '',
+        next_steps: Array.isArray(body?.next_steps)
+          ? body.next_steps.filter((step) => typeof step === 'string').slice(0, 10).map((step) => step.slice(0, 240))
+          : [],
+        status: body?.status === 'archived' ? 'archived' : 'active',
+        updated_at: new Date().toISOString(),
+      };
+
+      if (id) {
+        const { data, error } = await supabaseAdmin
+          .from('electoral_investigations')
+          .update(values)
+          .eq('id', id)
+          .eq('created_by', authResult.userId)
+          .select(columns)
+          .maybeSingle();
+        if (error) throw error;
+        if (!data) return Response.json({ error: 'Investigação não encontrada ou sem acesso.' }, { status: 404 });
+        return Response.json({ investigation: data });
+      }
+
+      const { data, error } = await supabaseAdmin
+        .from('electoral_investigations')
+        .insert({ ...values, created_by: authResult.userId })
+        .select(columns)
+        .single();
+      if (error) throw error;
+      return Response.json({ investigation: data }, { status: 201 });
+    } catch (error) {
+      console.error('[api/admin/electoral/investigations]', error);
+      return Response.json({ error: 'Não foi possível salvar a investigação.' }, { status: 500 });
+    }
+  },
+  '/api/admin/electoral/candidates': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (!(await canEffective(authResult.userId, authResult.role, 'inteligencia-eleitoral', 'view'))) {
+      return Response.json({ error: 'Acesso negado' }, { status: 403 });
+    }
+    if (request.method !== 'GET') return methodNotAllowed();
+
+    const url = new URL(request.url);
+    const rawQuery = (url.searchParams.get('q') ?? '').trim().slice(0, 80);
+    const query = rawQuery.replace(/[%,_()]/g, ' ').replace(/\s+/g, ' ').trim();
+    const normalizedQuery = query
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-zA-Z0-9 ]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const queryTerms = normalizedQuery.split(' ').filter(Boolean).slice(0, 8);
+    const year = Number(url.searchParams.get('year'));
+    if (![2018, 2022, 2026].includes(year)) {
+      return Response.json({ error: 'Ano eleitoral inválido para o escopo atual.' }, { status: 400 });
+    }
+    if (normalizedQuery.length < 2) return Response.json({ candidates: [] });
+
+    try {
+      const baseQuery = supabaseAdmin
+        .from('electoral_analytics_candidates')
+        .select('year,candidate_number,candidate_name,ballot_name,votes,rank')
+        .eq('year', year);
+      let searchQuery = baseQuery;
+      if (/^\d+$/.test(normalizedQuery)) {
+        searchQuery = searchQuery.eq('candidate_number', Number(normalizedQuery));
+      } else {
+        for (const term of queryTerms) {
+          searchQuery = searchQuery.or('candidate_name.ilike.%' + term + '%,ballot_name.ilike.%' + term + '%');
+        }
+      }
+      const { data, error } = await searchQuery
+        .order('candidate_name', { ascending: true })
+        .limit(25);
+      if (error) throw error;
+      return Response.json({
+        candidates: (data ?? []).map((row) => ({
+          year: Number(row.year),
+          candidate_number: Number(row.candidate_number),
+          candidate_name: row.candidate_name ? String(row.candidate_name) : row.ballot_name ? String(row.ballot_name) : null,
+          votes: row.votes == null ? null : Number(row.votes),
+          rank: row.rank == null ? null : Number(row.rank),
+        })),
+      });
+    } catch (error) {
+      console.error('[api/admin/electoral/candidates]', error);
+      return Response.json({ error: 'Falha ao pesquisar candidatos eleitorais.' }, { status: 500 });
+    }
+  },
+  '/api/admin/electoral/overview': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (!(await canEffective(authResult.userId, authResult.role, 'inteligencia-eleitoral', 'view'))) {
+      return Response.json({ error: 'Acesso negado' }, { status: 403 });
+    }
+    if (request.method !== 'GET') return methodNotAllowed();
+
+    try {
+      return Response.json(await getElectoralOverview());
+    } catch (error) {
+      console.error('[api/admin/electoral/overview]', error);
+      return Response.json({ error: 'Falha ao carregar a visão geral eleitoral.' }, { status: 500 });
+    }
+  },
+  '/api/admin/electoral/zones': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (!(await canEffective(authResult.userId, authResult.role, 'inteligencia-eleitoral', 'view'))) {
+      return Response.json({ error: 'Acesso negado' }, { status: 403 });
+    }
+    if (request.method !== 'GET') return methodNotAllowed();
+
+    try {
+      return Response.json(await getElectoralZones());
+    } catch (error) {
+      console.error('[api/admin/electoral/zones]', error);
+      return Response.json({ error: 'Falha ao carregar as zonas eleitorais.' }, { status: 500 });
+    }
+  },
+  '/api/admin/electoral/sections': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (!(await canEffective(authResult.userId, authResult.role, 'inteligencia-eleitoral', 'view'))) {
+      return Response.json({ error: 'Acesso negado' }, { status: 403 });
+    }
+    if (request.method !== 'GET') return methodNotAllowed();
+
+    const url = new URL(request.url);
+    const municipalityId = url.searchParams.get('municipalityId');
+    const zoneId = url.searchParams.get('zoneId');
+    const isUuid = (value: string | null): value is string => value != null && /^[0-9a-fA-F-]{36}$/.test(value);
+
+    if (municipalityId !== null && !isUuid(municipalityId)) {
+      return Response.json({ error: 'municipalityId inválido.' }, { status: 400 });
+    }
+    if (zoneId !== null && !isUuid(zoneId)) {
+      return Response.json({ error: 'zoneId inválido.' }, { status: 400 });
+    }
+    const candidateNumber = (url.searchParams.get('candidateNumber') ?? MAIN_CANDIDATE_NUMBER).trim();
+    if (!/^\d{1,6}$/.test(candidateNumber)) {
+      return Response.json({ error: 'candidateNumber inválido.' }, { status: 400 });
+    }
+    const rawLimit = url.searchParams.get('limit');
+    const rawOffset = url.searchParams.get('offset');
+    const limit = rawLimit == null ? 200 : Number(rawLimit);
+    const offset = rawOffset == null ? 0 : Number(rawOffset);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+      return Response.json({ error: 'limit deve ser um inteiro entre 1 e 500.' }, { status: 400 });
+    }
+    if (!Number.isInteger(offset) || offset < 0) {
+      return Response.json({ error: 'offset deve ser um inteiro não negativo.' }, { status: 400 });
+    }
+
+    try {
+      const result = await getElectoralSections({
+        municipalityId: isUuid(municipalityId) ? municipalityId : null,
+        zoneId: isUuid(zoneId) ? zoneId : null,
+        candidateNumber,
+        limit,
+        offset,
+      });
+      return Response.json(result);
+    } catch (error) {
+      console.error('[api/admin/electoral/sections]', error);
+      return Response.json({ error: 'Falha ao carregar as seções eleitorais.' }, { status: 500 });
+    }
+  },
+  '/api/admin/electoral/municipality/:code': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (!(await canEffective(authResult.userId, authResult.role, 'inteligencia-eleitoral', 'view'))) {
+      return Response.json({ error: 'Acesso negado' }, { status: 403 });
+    }
+    if (request.method !== 'GET') return methodNotAllowed();
+
+    const code = String((request as { params?: Record<string, string> }).params?.code ?? '').trim();
+    if (!/^[0-9a-zA-Z-]{1,40}$/.test(code)) {
+      return Response.json({ error: 'Código de município inválido.' }, { status: 400 });
+    }
+
+    try {
+      const detail = await getElectoralMunicipality(code);
+      if (!detail) return Response.json({ error: 'Município não encontrado.' }, { status: 404 });
+      return Response.json(detail);
+    } catch (error) {
+      console.error('[api/admin/electoral/municipality]', error);
+      return Response.json({ error: 'Falha ao carregar o município eleitoral.' }, { status: 500 });
+    }
+  },
+  '/api/admin/electoral/intelligence': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (!(await canEffective(authResult.userId, authResult.role, 'inteligencia-eleitoral', 'view'))) {
+      return Response.json({ error: 'Acesso negado' }, { status: 403 });
+    }
+    if (request.method !== 'POST') return methodNotAllowed();
+
+    try {
+      const body = await request.json() as Partial<ElectoralQuestionRequest>;
+      const questionId = typeof body?.questionId === 'string' ? body.questionId.trim() : '';
+      if (!questionId) return Response.json({ error: 'questionId é obrigatório.' }, { status: 400 });
+
+      const params = body?.params && typeof body.params === 'object' && !Array.isArray(body.params) ? body.params : {};
+      const result = await executeElectoralQuestion(questionId, params);
+      return Response.json(result);
+    } catch (error) {
+      console.error('[api/admin/electoral/intelligence]', error);
+      const message = error?.message || 'Falha ao executar inteligência eleitoral.';
+      const status = message.includes('ainda não está disponível') ? 422 : 500;
+      return Response.json({ error: message }, { status });
+    }
+  },
+  '/api/health': async (request) => {
+    if (request.method !== 'GET') return methodNotAllowed();
+    return Response.json({
+      status: 'ok',
+      app: 'Plataforma Carlos Búrigo',
+      runtime: 'cloudflare',
+      timestamp: new Date().toISOString(),
+    });
+  },
+  '/api/tasks': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (request.method === 'GET' && !(await canEffective(authResult.userId, authResult.role, 'tarefas', 'view'))) {
+      return Response.json({ error: 'Acesso negado' }, { status: 403 });
+    }
+    if (request.method === 'POST' && !(await canEffective(authResult.userId, authResult.role, 'tarefas', 'create'))) {
+      return Response.json({ error: 'Acesso negado' }, { status: 403 });
+    }
+    
+    if (request.method === 'GET') {
+      try {
+        const tasks = await getAdminTasks();
+        return Response.json(tasks);
+      } catch (error) {
+        console.error('[api/tasks GET]', error);
+        return Response.json({ error: 'Falha ao carregar tarefas' }, { status: 500 });
+      }
+    }
+    
+    if (request.method === 'POST') {
+
+      try {
+        const data = await request.json();
+        // Basic validation
+        if (!data?.title) {
+          return Response.json({ error: 'Título é obrigatório' }, { status: 400 });
+        }
+        const task = await createAdminTask({
+          ...data,
+          userId: authResult.userId
+        });
+        return Response.json(task, { status: 201 });
+      } catch (error) {
+        console.error('[api/tasks POST]', error);
+        return Response.json({ error: error?.message || 'Falha ao criar tarefa' }, { status: 400 });
+      }
+    }
+    
+    return methodNotAllowed();
+  },
+  '/api/tasks/:id': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    const id = (request as any).params?.id;
+    if (!id) return Response.json({ error: 'ID da tarefa é obrigatório' }, { status: 400 });
+    
+    // Check permissions based on method
+    if (request.method === 'GET') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'tarefas', 'view'))) {
+        return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      }
+      try {
+        const tasks = await getAdminTasks();
+        const task = tasks.find(t => t.id === id);
+        if (!task) return Response.json({ error: 'Tarefa não encontrada' }, { status: 404 });
+        return Response.json(task);
+      } catch (error) {
+        console.error('[api/tasks/:id GET]', error);
+        return Response.json({ error: 'Falha ao carregar tarefa' }, { status: 500 });
+      }
+    }
+    
+    if (request.method === 'PUT') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'tarefas', 'edit'))) {
+        return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      }
+      try {
+        const data = await request.json();
+        // Basic validation
+        if (!data?.title) {
+          return Response.json({ error: 'Título é obrigatório' }, { status: 400 });
+        }
+        const updated = await updateAdminTask(id, {
+          ...data,
+          userId: authResult.userId
+        });
+        if (!updated) return Response.json({ error: 'Tarefa não encontrada' }, { status: 404 });
+        return Response.json(updated);
+      } catch (error) {
+        console.error('[api/tasks/:id PUT]', error);
+        return Response.json({ error: error?.message || 'Falha ao atualizar tarefa' }, { status: 400 });
+      }
+    }
+    
+    if (request.method === 'DELETE') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'tarefas', 'delete'))) {
+        return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      }
+      try {
+        const deleted = await deleteAdminTask(id);
+        if (!deleted) return Response.json({ error: 'Tarefa não encontrada' }, { status: 404 });
+        return Response.json({ success: true });
+      } catch (error) {
+        console.error('[api/tasks/:id DELETE]', error);
+        return Response.json({ error: 'Falha ao excluir tarefa' }, { status: 500 });
+      }
+    }
+    
+    return methodNotAllowed();
+  },
+  '/api/platform-settings': async (request) => {
+    try {
+      if (request.method === 'GET') {
+        const settings = await getPlatformSettings();
+        return Response.json(settings);
+      }
+
+const authResult = await requireAuth(request);
+       if (authResult instanceof Response) return authResult;
+       // Type guard: after the instanceof check, authResult is { userId: string; role: string; user: User }
+       const { userId, role, user } = authResult;
+if (!(await canEffective(authResult.userId, authResult.role, 'configurações', 'manage_settings'))) {
+      return Response.json({ error: 'Acesso negado' }, { status: 403 });
+    }
+
+       if (request.method === 'PUT') {
+         const body = await request.json();
+         if (typeof body?.citizenDemandEnabled !== 'boolean') {
+           return Response.json({ error: 'citizenDemandEnabled deve ser booleano' }, { status: 400 });
+         }
+         const settings = await updatePlatformSettings({
+           citizenDemandEnabled: body.citizenDemandEnabled,
+         });
+         const actor = await getAdminUserById(userId);
+         await createAdminAuditLog({
+           userId: userId,
+           userName: actor?.name ?? userId,
+           userRole: role,
+           action: 'update',
+           entityType: 'platform_settings',
+           entityId: 'true',
+           details: { citizenDemandEnabled: settings.citizenDemandEnabled },
+         });
+        return Response.json(settings);
+      }
+
+      return Response.json({ error: 'Método não permitido' }, { status: 405 });
+    } catch (error) {
+      console.error('[api/platform-settings]', error);
+      return Response.json({ error: 'Falha ao carregar configurações operacionais' }, { status: 500 });
+    }
+  },
+
+  '/api/settings': async (request) => {
+    if (request.method === 'GET') {
+      try {
+        const settings = await getPublicSettings();
+        if (settings) return Response.json(settings);
+      } catch (error) {
+        console.error('[api/settings GET]', error);
+      }
+      return Response.json({
+        candidate_title: 'Candidato a Deputado Estadual',
+        mandate_title: 'Deputado Estadual',
+        institutional_title: 'Carlos Búrigo',
+        candidate_name: 'Carlos Búrigo',
+        candidateTitle: 'Candidato a Deputado Estadual',
+        mandateTitle: 'Deputado Estadual',
+        institutionalTitle: 'Carlos Búrigo',
+        candidateName: 'Carlos Búrigo',
+        gabinete_address_poa: 'Assembleia Legislativa do RS — Praça Marechal Deodoro, 101, Gabinete 502, Centro Histórico, Porto Alegre - RS',
+        gabinete_address_caxias: 'Escritório Regional Serra Gaúcha — Rua Sinimbu, 1870, Sala 402, Caxias do Sul - RS',
+        gabineteAddressPoa: 'Assembleia Legislativa do RS — Praça Marechal Deodoro, 101, Gabinete 502, Centro Histórico, Porto Alegre - RS',
+        gabineteAddressCaxias: 'Escritório Regional Serra Gaúcha — Rua Sinimbu, 1870, Sala 402, Caxias do Sul - RS',
+        gabinete_phone: '(51) 3210-2000',
+        gabinete_whatsapp: '(54) 99915-1515',
+        gabinete_email: 'carlos.burigo@al.rs.gov.br',
+        gabinetePhone: '(51) 3210-2000',
+        gabineteWhatsapp: '(54) 99915-1515',
+        gabineteEmail: 'carlos.burigo@al.rs.gov.br',
+        social_instagram: 'https://www.instagram.com/carlosburigo15/',
+        social_facebook: 'https://www.facebook.com/CBurigo/?locale=pt_BR',
+        social_youtube: 'https://www.youtube.com/@carlosburigo',
+        social_whatsapp: 'https://wa.me/5554999151515',
+        socialInstagram: 'https://www.instagram.com/carlosburigo15/',
+        socialFacebook: 'https://www.facebook.com/CBurigo/?locale=pt_BR',
+        socialYoutube: 'https://www.youtube.com/@carlosburigo',
+        socialWhatsapp: 'https://wa.me/5554999151515',
+        seo_default_title: 'Carlos Búrigo | Deputado Estadual • Rio Grande do Sul',
+        seo_default_description: 'Plataforma oficial de Carlos Búrigo. Conheça a trajetória de quem foi Prefeito de São José dos Ausentes, Secretário da Fazenda de Caxias do Sul, Secretário de Estado e atual Líder do MDB na ALRS.',
+        seoDefaultTitle: 'Carlos Búrigo | Deputado Estadual • Rio Grande do Sul',
+        seoDefaultDescription: 'Plataforma oficial de Carlos Búrigo. Conheça a trajetória de quem foi Prefeito de São José dos Ausentes, Secretário da Fazenda de Caxias do Sul, Secretário de Estado e atual Líder do MDB na ALRS.',
+        seo_default_image_url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=800&q=80',
+        seoDefaultImageUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=800&q=80',
+        privacy_policy_text: 'Em conformidade com a LGPD (Lei nº 13.709/2018), os dados cadastrados pelos cidadãos são utilizados exclusivamente para o atendimento do gabinete.',
+        privacyPolicyText: 'Em conformidade com a LGPD (Lei nº 13.709/2018), os dados cadastrados pelos cidadãos são utilizados exclusivamente para o atendimento do gabinete.',
+        mandate_slogan: 'Trabalho sério, presença e resultados reais para o Rio Grande.',
+        bio_highlights: [
+          'Ex-prefeito de São José dos Ausentes (2 mandatos)',
+          '9 anos como Secretário da Fazenda de Caxias do Sul',
+          'Secretário de Estado e atual Líder do MDB na ALRS',
+          'Defensor do desenvolvimento sustentável e da redução de burocracia'
+        ],
+        cta_title: 'Fale com o Gabinete',
+        cta_subtitle: 'Entre em contato com nossa equipe e envie sua demanda para o Rio Grande',
+        gabinete_phone_caxias: '(54) 3210-2000',
+        site_mode: 'mandate',
+        electoral_number: '15140',
+        party_number: '15',
+        party_name: 'MDB',
+        campaign_slogan: 'Trabalho sério pelo Rio Grande',
+        campaign_cnpj: '',
+        campaign_coalition: 'MDB',
+        official_election_date: '2026-10-04',
+      });
+    }
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (request.method !== 'PUT') return methodNotAllowed();
+    if (!(await canEffective(authResult.userId, authResult.role, 'configurações', 'manage_settings'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+    try {
+      return Response.json(await updateAdminSettings(await request.json()));
+    } catch (error) {
+      console.error('[api/settings PUT]', error);
+      return Response.json({ error: error?.message || 'Falha ao atualizar configurações' }, { status: 400 });
+    }
+  },
+  '/api/results': async (request) => {
+    if (request.method === 'GET') {
+      try {
+        return Response.json(await getPublicResults());
+      } catch (error) {
+        console.error('[api/results GET]', error);
+        return Response.json({ error: 'Falha ao carregar resultados do acervo' }, { status: 500 });
+      }
+    }
+const authResult = await requireAuth(request);
+     if (authResult instanceof Response) return authResult;
+     // Type guard: after the instanceof check, authResult is { userId: string; role: string; user: User }
+     const { userId, role, user } = authResult;
+if (request.method === 'POST') {
+        if (!(await canEffective(authResult.userId, authResult.role, 'atuação', 'create'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+        try {
+          const data = await request.json();
+          if (!data?.title || !data?.category || !data?.description) return Response.json({ error: 'title, category e description são obrigatórios' }, { status: 400 });
+          return Response.json(await createAdminResult(data), { status: 201 });
+        } catch (error) {
+          console.error('[api/results POST]', error);
+          return Response.json({ error: error?.message || 'Falha ao criar resultado' }, { status: 400 });
+        }
+      }
+    return methodNotAllowed();
+  },
+'/api/results/:id': async (request) => {
+     const authResult = await requireAuth(request);
+     if (authResult instanceof Response) return authResult;
+     // Type guard: after the instanceof check, authResult is { userId: string; role: string; user: User }
+     const { userId, role, user } = authResult;
+     const id = (request as any).params?.id;
+     if (!id) return Response.json({ error: 'id é obrigatório' }, { status: 400 });
+if (request.method === 'PUT') {
+        if (!(await canEffective(authResult.userId, authResult.role, 'atuação', 'edit'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+        try {
+          const updated = await updateAdminResult(id, await request.json());
+          if (!updated) return Response.json({ error: 'Resultado não encontrado' }, { status: 404 });
+          return Response.json(updated);
+        } catch (error) {
+          console.error('[api/results/:id PUT]', error);
+          return Response.json({ error: error?.message || 'Falha ao atualizar resultado' }, { status: 400 });
+        }
+      }
+if (request.method === 'DELETE') {
+        if (!(await canEffective(authResult.userId, authResult.role, 'atuação', 'delete'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+        try {
+          const deleted = await deleteAdminResult(id);
+          if (!deleted) return Response.json({ error: 'Resultado não encontrado' }, { status: 404 });
+          return Response.json({ success: true });
+        } catch (error) {
+          console.error('[api/results/:id DELETE]', error);
+          return Response.json({ error: error?.message || 'Falha ao excluir resultado' }, { status: 400 });
+        }
+      }
+     return methodNotAllowed();
+  },
+'/api/municipalities': async (request) => {
+     if (request.method === 'GET') {
+       try {
+         return Response.json(await getPublicMunicipalities());
+       } catch (error) {
+         console.error('[api/municipalities GET]', error);
+         return Response.json({ error: 'Falha ao carregar municípios do acervo' }, { status: 500 });
+       }
+     }
+     const authResult = await requireAuth(request);
+     if (authResult instanceof Response) return authResult;
+     // Type guard: after the instanceof check, authResult is { userId: string; role: string; user: User }
+     const { userId, role, user } = authResult;
+if (request.method === 'POST') {
+        if (!(await canEffective(authResult.userId, authResult.role, 'atuação', 'create'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+        try {
+          const data = await request.json();
+          if (!data?.name || !data?.region || !Array.isArray(data?.keyDeliveries)) return Response.json({ error: 'name, region e keyDeliveries são obrigatórios' }, { status: 400 });
+          return Response.json(await createAdminMunicipality(data), { status: 201 });
+        } catch (error) {
+          console.error('[api/municipalities POST]', error);
+          return Response.json({ error: error?.message || 'Falha ao criar município' }, { status: 400 });
+        }
+      }
+     return methodNotAllowed();
+  },
+'/api/municipalities/:id': async (request) => {
+     const authResult = await requireAuth(request);
+     if (authResult instanceof Response) return authResult;
+     // Type guard: after the instanceof check, authResult is { userId: string; role: string; user: User }
+     const { userId, role, user } = authResult;
+     const id = (request as any).params?.id;
+     if (!id) return Response.json({ error: 'id é obrigatório' }, { status: 400 });
+if (request.method === 'PUT') {
+        if (!(await canEffective(authResult.userId, authResult.role, 'atuação', 'edit'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+        try {
+          const updated = await updateAdminMunicipality(id, await request.json());
+          if (!updated) return Response.json({ error: 'Município não encontrado' }, { status: 404 });
+          return Response.json(updated);
+        } catch (error) {
+          console.error('[api/municipalities/:id PUT]', error);
+          return Response.json({ error: error?.message || 'Falha ao atualizar município' }, { status: 400 });
+        }
+      }
+if (request.method === 'DELETE') {
+        if (!(await canEffective(authResult.userId, authResult.role, 'atuação', 'delete'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+        try {
+          const deleted = await deleteAdminMunicipality(id);
+          if (!deleted) return Response.json({ error: 'Município não encontrado' }, { status: 404 });
+          return Response.json({ success: true });
+        } catch (error) {
+          console.error('[api/municipalities/:id DELETE]', error);
+          return Response.json({ error: error?.message || 'Falha ao excluir município' }, { status: 400 });
+        }
+      }
+     return methodNotAllowed();
+  },
+  '/api/admin/upload': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (!(await canEffective(authResult.userId, authResult.role, 'gestao-documental', 'create')) && !(await canEffective(authResult.userId, authResult.role, 'conteúdo', 'create'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+    if (request.method !== 'POST') return methodNotAllowed();
+    try {
+      // Defensive: keep the 400 contract stable instead of surfacing a TypeError leak.
+      // the 400 contract stable instead of surfacing a TypeError leak.
+      const contentType = request.headers.get('content-type') ?? '';
+      if (!contentType.includes('multipart/form-data')) {
+        return Response.json({ error: 'Envie o arquivo como multipart/form-data' }, { status: 400 });
+      }
+      const form = await request.formData();
+      const file = form.get('file');
+      const visibility = String(form.get('visibility') || 'publico');
+      if (!['publico', 'interno', 'restrito'].includes(visibility)) return Response.json({ error: 'Visibilidade inválida' }, { status: 400 });
+      if (!(file instanceof File)) return Response.json({ error: 'Arquivo é obrigatório' }, { status: 400 });
+      if (file.size > 50 * 1024 * 1024) return Response.json({ error: 'Arquivo excede o limite de 50 MB' }, { status: 400 });
+      const allowed = new Set(['application/pdf','application/msword','application/vnd.openxmlformats-officedocument.wordprocessingml.document','text/plain','image/jpeg','image/png','image/webp','image/gif','video/mp4','video/webm','video/quicktime']);
+      if (!allowed.has(file.type)) return Response.json({ error: 'Tipo de arquivo não permitido' }, { status: 400 });
+      const extension = file.name.includes('.') ? file.name.split('.').pop()?.toLowerCase() : 'bin';
+      const storagePath = `uploads/${crypto.randomUUID()}.${extension}`;
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const bucket = visibility === 'publico' ? 'documents' : 'documents-private';
+      const { error } = await supabaseAdmin.storage.from(bucket).upload(storagePath, bytes, { contentType: file.type, upsert: false });
+      if (error) throw error;
+      const baseUrl = new URL(request.url).origin;
+      let url = new URL(`/storage/v1/object/public/documents/${storagePath}`, baseUrl).toString();
+      if (bucket === 'documents-private') {
+        const signed = await supabaseAdmin.storage.from(bucket).createSignedUrl(storagePath, 3600);
+        if (signed.error || !signed.data?.signedUrl) throw signed.error || new Error('Falha ao gerar URL privada');
+        url = signed.data.signedUrl;
+      }
+      return Response.json({ url, storagePath, mimeType: file.type, size: file.size }, { status: 201 });
+    } catch (error) {
+      console.error('[api/admin/upload]', error);
+      return Response.json({ error: error?.message || 'Falha ao enviar arquivo' }, { status: 400 });
+    }
+  },
+
+  '/api/videos': async (request) => {
+    if (request.method === 'GET') {
+      try {
+        const videos = await getPublicVideos();
+        return Response.json(videos.map(mapToPublicVideoDto));
+      } catch (error) {
+        console.error('[api/videos GET]', error);
+        return Response.json({ error: 'Falha ao carregar vídeos do acervo' }, { status: 500 });
+      }
+    }
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (request.method === 'POST') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'conteúdo', 'create'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      try {
+        const data = await request.json();
+        if (!data?.title || !data?.url || !data?.platform || !data?.category) return Response.json({ error: 'title, url, platform e category são obrigatórios' }, { status: 400 });
+        return Response.json(await createAdminVideo(data), { status: 201 });
+      } catch (error) {
+        console.error('[api/videos POST]', error);
+        return Response.json({ error: error?.message || 'Falha ao criar vídeo' }, { status: 400 });
+      }
+    }
+    return methodNotAllowed();
+  },
+  '/api/videos/:id': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    const id = (request as any).params?.id;
+    if (!id) return Response.json({ error: 'id é obrigatório' }, { status: 400 });
+    if (request.method === 'PUT') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'conteúdo', 'edit'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      try {
+        const updated = await updateAdminVideo(id, await request.json());
+        if (!updated) return Response.json({ error: 'Vídeo não encontrado' }, { status: 404 });
+        return Response.json(updated);
+      } catch (error) {
+        console.error('[api/videos/:id PUT]', error);
+        return Response.json({ error: error?.message || 'Falha ao atualizar vídeo' }, { status: 400 });
+      }
+    }
+    if (request.method === 'DELETE') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'conteúdo', 'delete'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      try {
+        const deleted = await deleteAdminVideo(id);
+        if (!deleted) return Response.json({ error: 'Vídeo não encontrado' }, { status: 404 });
+        return Response.json({ success: true });
+      } catch (error) {
+        console.error('[api/videos/:id DELETE]', error);
+        return Response.json({ error: 'Falha ao excluir vídeo' }, { status: 400 });
+      }
+    }
+    return methodNotAllowed();
+  },
+  '/api/media': async (request) => {
+    if (request.method !== 'GET') return methodNotAllowed();
+    try {
+      const media = await getPublicMedia();
+      const mappedMedia = media.map(mapToPublicMediaDto);
+      return Response.json(mappedMedia);
+    } catch (error) {
+      console.error('[api/media]', error);
+      return Response.json(
+        { error: 'Falha ao carregar mídia do acervo' },
+        { status: 500 }
+      );
+    }
+  },
+  '/api/news': async (request) => {
+    if (request.method === 'GET') {
+      try {
+        return Response.json(await getPublicNews());
+      } catch (error) {
+        console.error('[api/news]', error);
+        return Response.json({ error: 'Falha ao carregar notícias do acervo' }, { status: 500 });
+      }
+    }
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (request.method === 'POST') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'conteúdo', 'create'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      return respond(async () => createAdminNews(await request.json(), authResult.userId), 'news POST', 'Falha ao criar notícia');
+    }
+    return methodNotAllowed();
+  },
+  '/api/agenda': async (request) => {
+    if (request.method === 'GET') {
+      try {
+        return Response.json(await getPublicAgenda());
+      } catch (error) {
+        console.error('[api/agenda]', error);
+        return Response.json({ error: 'Falha ao carregar agenda do acervo' }, { status: 500 });
+      }
+    }
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (request.method === 'POST') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'agenda', 'create'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      return respond(async () => createAdminAgenda(await request.json(), authResult.userId), 'agenda POST', 'Falha ao criar compromisso');
+    }
+    return methodNotAllowed();
+  },
+  '/api/news/:id': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    const id = extractPathParams('/api/news/:id', new URL(request.url).pathname)?.id;
+    if (!id) return Response.json({ error: 'ID da notícia não fornecido' }, { status: 400 });
+    if (request.method === 'PUT') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'conteúdo', 'edit'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      return respond(async () => updateAdminNews(id, await request.json()), 'news PUT', 'Falha ao atualizar notícia');
+    }
+    if (request.method === 'DELETE') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'conteúdo', 'delete'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      return respond(() => deleteAdminNews(id), 'news DELETE', 'Falha ao excluir notícia');
+    }
+    return methodNotAllowed();
+  },
+  '/api/agenda/:id': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    const id = extractPathParams('/api/agenda/:id', new URL(request.url).pathname)?.id;
+    if (!id) return Response.json({ error: 'ID do compromisso não fornecido' }, { status: 400 });
+    if (request.method === 'PUT') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'agenda', 'edit'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      return respond(async () => updateAdminAgenda(id, await request.json()), 'agenda PUT', 'Falha ao atualizar compromisso');
+    }
+    if (request.method === 'DELETE') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'agenda', 'delete'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      return respond(() => deleteAdminAgenda(id), 'agenda DELETE', 'Falha ao excluir compromisso');
+    }
+    return methodNotAllowed();
+  },
+  '/api/events': async (request) => {
+    if (request.method !== 'GET') return methodNotAllowed();
+    try {
+      const events = await getPublicAgenda(); // Note: events uses getPublicAgenda in original
+      return Response.json(events);
+    } catch (error) {
+      console.error('[api/events]', error);
+      return Response.json(
+        { error: 'Falha ao carregar eventos do acervo' },
+        { status: 500 }
+      );
+    }
+  },
+  '/api/legislative': async (request) => {
+    if (request.method !== 'GET') return methodNotAllowed();
+    try {
+      const items = await getPublicLegislativeItems();
+      return Response.json(items);
+    } catch (error) {
+      console.error('[api/legislative]', error);
+      return Response.json(
+        { error: 'Falha ao carregar atividade legislativa do acervo' },
+        { status: 500 }
+      );
+    }
+  },
+  '/api/pages': async (request) => {
+    if (request.method !== 'GET') return methodNotAllowed();
+    try {
+      const pages = await getPublicPages();
+      return Response.json(pages);
+    } catch (error) {
+      console.error('[api/pages]', error);
+      return Response.json(
+        { error: 'Falha ao carregar páginas do acervo' },
+        { status: 500 }
+      );
+    }
+  },
+  '/api/pages/:slug': async (request) => {
+    if (request.method !== 'GET') return methodNotAllowed();
+    try {
+      const url = new URL(request.url);
+      const slug = url.pathname.split('/').pop();
+      if (!slug) {
+        return Response.json(
+          { error: 'Slug não fornecido' },
+          { status: 400 }
+        );
+      }
+      const pages = await getPublicPages(slug);
+      if (!pages.length) {
+        return Response.json(
+          { error: 'Página não encontrada no acervo público' },
+          { status: 404 }
+        );
+      }
+      return Response.json(pages[0]);
+    } catch (error) {
+      console.error('[api/pages/:slug]', error);
+      return Response.json(
+        { error: 'Falha ao carregar página do acervo' },
+        { status: 500 }
+      );
+    }
+  },
+  '/api/documents': async (request) => {
+    if (request.method !== 'GET') return methodNotAllowed();
+    try {
+      const documents = await getPublicDocuments();
+      return Response.json(documents);
+    } catch (error) {
+      console.error('[api/documents]', error);
+      return Response.json(
+        { error: 'Falha ao carregar documentos do acervo' },
+        { status: 500 }
+      );
+    }
+  },
+  '/api/admin/evidence': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (request.method !== 'GET') return methodNotAllowed();
+    if (!(await canEffective(authResult.userId, authResult.role, 'gestao-documental', 'view'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+    try {
+      return Response.json(await getAdminEvidence());
+    } catch (error) {
+      console.error('[api/admin/evidence]', error);
+      return Response.json({ error: 'Falha ao carregar evidências' }, { status: 500 });
+    }
+  },
+
+  '/api/admin/documents': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (request.method === 'GET') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'gestao-documental', 'view'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      try {
+        return Response.json(await getAdminDocuments());
+      } catch (error) {
+        console.error('[api/admin/documents GET]', error);
+        return Response.json({ error: 'Falha ao carregar documentos' }, { status: 500 });
+      }
+    }
+    if (request.method === 'POST') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'gestao-documental', 'create'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      try {
+        const document = await createAdminDocument(await request.json());
+        if (document) {
+          await createAdminAuditLog({
+            userId: authResult.userId,
+            userName: authResult.user.name,
+            userRole: authResult.role,
+            action: 'CREATE',
+            entityType: 'document',
+            entityId: document.id,
+            details: { title: document.title, category: document.category, visibility: document.visibility, status: document.status },
+          });
+        }
+        return Response.json(document, { status: 201 });
+      } catch (error) {
+        console.error('[api/admin/documents POST]', error);
+        return Response.json({ error: error?.message || 'Falha ao criar documento' }, { status: 400 });
+      }
+    }
+    return methodNotAllowed();
+  },
+  '/api/admin/documents/:id': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (request.method !== 'PUT') return methodNotAllowed();
+    if (!(await canEffective(authResult.userId, authResult.role, 'gestao-documental', 'edit'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+    const id = (request as any).params?.id;
+    if (!id) return Response.json({ error: 'ID do documento é obrigatório' }, { status: 400 });
+    try {
+      const body = await request.json();
+      const document = await updateAdminDocument(id, body);
+      if (!document) return Response.json({ error: 'Documento não encontrado' }, { status: 404 });
+      await createAdminAuditLog({
+        userId: authResult.userId,
+        userName: authResult.user.name,
+        userRole: authResult.role,
+        action: 'UPDATE',
+        entityType: 'document',
+        entityId: id,
+        details: { changedFields: Object.keys(body), title: document.title, category: document.category, visibility: document.visibility, status: document.status },
+      });
+      return Response.json(document);
+    } catch (error) {
+      console.error('[api/admin/documents/:id]', error);
+      return Response.json({ error: error?.message || 'Falha ao atualizar documento' }, { status: 400 });
+    }
+  },
+  '/api/evidence': async (request) => {
+    if (request.method !== 'GET') return methodNotAllowed();
+    try {
+      const evidence = await getPublicEvidence();
+      return Response.json(evidence);
+    } catch (error) {
+      console.error('[api/evidence]', error);
+      return Response.json(
+        { error: 'Falha ao carregar evidências do acervo' },
+        { status: 500 }
+      );
+    }
+  },
+  // Admin endpoints - require authentication
+  '/api/admin/pages': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    
+    if (request.method === 'GET') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'conteúdo', 'view'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      try {
+        const pages = await getAdminPages();
+        return Response.json(pages);
+      } catch (error) {
+        console.error('[api/admin/pages]', error);
+        return Response.json(
+          { error: 'Falha ao carregar páginas do Page Builder' },
+          { status: 500 }
+        );
+      }
+    } else if (request.method === 'POST') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'conteúdo', 'create'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      try {
+        const data = await request.json();
+        const page = await createAdminPage(data);
+        return Response.json(page, { status: 201 });
+      } catch (error) {
+        console.error('[api/admin/pages POST]', error);
+        const status = error?.code === '23505' ? 409 : 400;
+        return Response.json(
+          {
+            error:
+              error?.code === '23505'
+                ? 'Já existe uma página com este slug.'
+                : error?.message ||
+                  'Falha ao criar página',
+          },
+          { status }
+        );
+      }
+    } else {
+      return methodNotAllowed();
+    }
+  },
+  '/api/admin/pages/:id': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    
+    if (request.method === 'GET') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'conteúdo', 'view'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      try {
+        const url = new URL(request.url);
+        const idMatch = extractPathParams('/api/admin/pages/:id', url.pathname);
+        if (!idMatch) {
+          return Response.json(
+            { error: 'ID da página não fornecido' },
+            { status: 400 }
+          );
+        }
+        const id = idMatch.id;
+        const page = await getAdminPage(id);
+        if (!page) {
+          return Response.json(
+            { error: 'Página não encontrada' },
+            { status: 404 }
+          );
+        }
+        return Response.json(page);
+      } catch (error) {
+        console.error('[api/admin/pages/:id]', error);
+        return Response.json(
+          { error: 'Falha ao carregar página' },
+          { status: 500 }
+        );
+      }
+    } else if (request.method === 'PUT') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'conteúdo', 'edit'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      try {
+        const url = new URL(request.url);
+        const idMatch = extractPathParams('/api/admin/pages/:id', url.pathname);
+        if (!idMatch) {
+          return Response.json(
+            { error: 'ID da página não fornecido' },
+            { status: 400 }
+          );
+        }
+        const id = idMatch.id;
+        const data = await request.json();
+        const page = await updateAdminPage(id, data);
+        return Response.json(page);
+      } catch (error) {
+        console.error('[api/admin/pages PUT]', error);
+        const status =
+          error?.code === '23505'
+            ? 409
+            : error?.message === 'Página não encontrada.'
+            ? 404
+            : 400;
+        return Response.json(
+          {
+            error:
+              error?.code === '23505'
+                ? 'Já existe uma página com este slug.'
+                : error?.message || 'Falha ao salvar página',
+          },
+          { status }
+        );
+      }
+    } else {
+      return methodNotAllowed();
+    }
+  },
+  '/api/admin/pages/:id/rollback': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    
+    if (request.method === 'POST') {
+      if (!(await canEffective(authResult.userId, authResult.role, 'conteúdo', 'edit'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+      try {
+        const url = new URL(request.url);
+        const idMatch = extractPathParams('/api/admin/pages/:id/rollback', url.pathname);
+        if (!idMatch) {
+          return Response.json(
+            { error: 'URL inválida para rollback' },
+            { status: 400 }
+          );
+        }
+        
+        const pageId = idMatch.id;
+        
+        if (!pageId) {
+          return Response.json(
+            { error: 'ID da página não fornecido' },
+            { status: 400 }
+          );
+        }
+        const data = await request.json();
+        const versionId = data.versionId;
+        if (!versionId) {
+          return Response.json(
+            { error: 'ID da versão não fornecido' },
+            { status: 400 }
+          );
+        }
+        const page = await rollbackAdminPage(pageId, versionId);
+        return Response.json(page);
+      } catch (error) {
+        console.error('[api/admin/pages/:id/rollback]', error);
+        return Response.json(
+          { error: 'Falha ao restaurar versão' },
+          { status: 500 }
+        );
+      }
+    } else {
+      return methodNotAllowed();
+    }
+  },
+  
+  // Citizen demand endpoints
+  '/api/citizen/account': async (request) => {
+    if (request.method !== 'POST') return methodNotAllowed();
+try {
+       const { email, password, name, phone } = await request.json();
+       if (typeof email !== 'string' || typeof password !== 'string' || typeof name !== 'string' || typeof phone !== 'string') {
+         return Response.json({ error: 'Nome, e-mail, telefone e senha são obrigatórios.' }, { status: 400 });
+       }
+       
+       const passwordValidation = validatePassword(password);
+       if (!passwordValidation.valid) return Response.json({ error: passwordValidation.error }, { status: 400 });
+       
+       const normalizedEmail = email.trim().toLowerCase();
+      const normalizedPhone = normalizeBrazilPhone(phone);
+      const { data, error } = await supabaseAdmin.auth.admin.createUser({
+        email: normalizedEmail,
+        password,
+        email_confirm: true,
+        user_metadata: { name: name.trim(), phone: normalizedPhone },
+      });
+      if (error || !data.user) {
+        console.error('[api/citizen/account]', error);
+        return Response.json({ error: 'Não foi possível criar a conta com esses dados.' }, { status: 400 });
+      }
+      return Response.json({ success: true, user: { id: data.user.id, email: data.user.email } });
+    } catch (error) {
+      console.error('[api/citizen/account]', error);
+      return Response.json({ error: 'Falha ao criar a conta.' }, { status: 500 });
+    }
+  },
+
+  '/api/citizen/demand': async (request) => {
+    if (request.method !== 'POST') return methodNotAllowed();
+    const platformSettings = await getPlatformSettings();
+    if (!platformSettings.citizenDemandEnabled) {
+      return Response.json({ error: 'O canal de atendimento está temporariamente indisponível.' }, { status: 503 });
+    }
+    const auth = await requireCitizenAuth(request);
+    if (auth instanceof Response) return auth;
+    try {
+      const data = await request.json();
+      const {
+        citizenName, citizenEmail, citizenPhone, municipality, neighborhood,
+        category, subject, description, attachments = [], lgpdConsent
+      } = data;
+
+      if (!citizenName || !citizenEmail || !citizenPhone || !municipality || !category || !subject || !description) {
+        return Response.json({ error: 'Campos obrigatórios faltando.' }, { status: 400 });
+      }
+      if (!lgpdConsent) return Response.json({ error: 'Consentimento LGPD é obrigatório.' }, { status: 400 });
+      if (citizenEmail.trim().toLowerCase() !== auth.email.toLowerCase()) {
+        return Response.json({ error: 'O e-mail da demanda deve ser o mesmo da conta.' }, { status: 400 });
+      }
+
+      const normalizedPhone = normalizeBrazilPhone(citizenPhone);
+      let protocol: string | null = null;
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const candidateProtocol = `#2026-${Math.floor(100000 + Math.random() * 900000)}`;
+        const { data: existingDemand } = await supabaseAdmin.from('demands').select('id').eq('protocol', candidateProtocol).maybeSingle();
+        if (!existingDemand) { protocol = candidateProtocol; break; }
+      }
+      if (!protocol) return Response.json({ error: 'Não foi possível gerar um protocolo único.' }, { status: 500 });
+
+      const trackingTokenHash = await sha256Hex(`${protocol}:${auth.userId}:${crypto.randomUUID()}`);
+      const now = new Date().toISOString();
+      const { data: demand, error: demandError } = await supabaseAdmin.from('demands').insert({
+        protocol,
+        tracking_token_hash: trackingTokenHash,
+        citizen_user_id: auth.userId,
+        citizen_name: citizenName.trim(),
+        citizen_email: auth.email.toLowerCase(),
+        citizen_phone: normalizedPhone,
+        municipality,
+        neighborhood: neighborhood || null,
+        category,
+        subject,
+        description,
+        attachments: Array.isArray(attachments) ? attachments : [],
+        priority: 'média',
+        status: 'recebida',
+        created_at: now,
+        updated_at: now,
+      }).select('id,protocol,citizen_name,citizen_email,citizen_phone,municipality,neighborhood,category,subject,description,attachments,priority,status,created_at,updated_at').single();
+      if (demandError || !demand) throw demandError ?? new Error('Demanda não criada');
+
+      const { error: historyError } = await supabaseAdmin.from('demand_history').insert({
+        demand_id: demand.id,
+        action: 'Criação da demanda',
+        new_status: 'recebida',
+        actor_id: auth.userId,
+        actor_name: demand.citizen_name,
+        actor_role: 'citizen',
+        note: 'Demanda criada via portal do cidadão',
+        created_at: now,
+      });
+      if (historyError) throw historyError;
+
+      return Response.json({ success: true, protocol, demand, message: 'Demanda protocolada com sucesso.' });
+    } catch (error) {
+      console.error('[api/citizen/demand]', error);
+      return Response.json({ error: 'Falha ao processar demanda.' }, { status: 500 });
+    }
+  },
+
+  '/api/citizen/lookup': async (request) => {
+    if (request.method !== 'GET') return methodNotAllowed();
+    const auth = await requireCitizenAuth(request);
+    if (auth instanceof Response) return auth;
+    try {
+      const url = new URL(request.url);
+      const id = url.searchParams.get('id');
+      if (!id) return Response.json({ error: 'Parâmetro id é obrigatório.' }, { status: 400 });
+      const { data: demand } = await supabaseAdmin.from('demands')
+        .select('id,protocol,citizen_name,citizen_email,citizen_phone,municipality,neighborhood,category,subject,description,attachments,priority,status,created_at,updated_at')
+        .eq('id', id).eq('citizen_user_id', auth.userId).maybeSingle();
+      if (!demand) return Response.json({ error: 'Demanda não encontrada.' }, { status: 404 });
+      const [{ data: messages }, { data: history }] = await Promise.all([
+        supabaseAdmin.from('demand_messages').select('id,demand_id,sender_type,sender_name,text,attachments,created_at').eq('demand_id', id).order('created_at', { ascending: true }),
+        supabaseAdmin.from('demand_history').select('id,demand_id,action,previous_status,new_status,actor_name,note,created_at').eq('demand_id', id).order('created_at', { ascending: true }),
+      ]);
+      return Response.json({ ...demand, messages: messages ?? [], history: history ?? [] });
+    } catch (error) {
+      console.error('[api/citizen/lookup]', error);
+      return Response.json({ error: 'Falha ao buscar demanda.' }, { status: 500 });
+    }
+  },
+
+  '/api/citizen/demands': async (request) => {
+    if (request.method !== 'GET') return methodNotAllowed();
+    const auth = await requireCitizenAuth(request);
+    if (auth instanceof Response) return auth;
+    try {
+      const { data, error } = await supabaseAdmin.from('demands')
+        .select('id,protocol,citizen_name,municipality,category,subject,priority,status,created_at,updated_at')
+        .eq('citizen_user_id', auth.userId).order('created_at', { ascending: false });
+      if (error) throw error;
+      return Response.json(data ?? []);
+    } catch (error) {
+      console.error('[api/citizen/demands]', error);
+      return Response.json({ error: 'Falha ao carregar suas demandas.' }, { status: 500 });
+    }
+  },
+
+  '/api/citizen/messages': async (request) => {
+    if (request.method !== 'POST') return methodNotAllowed();
+    const auth = await requireCitizenAuth(request);
+    if (auth instanceof Response) return auth;
+    try {
+      const { demandId, text, attachments = [] } = await request.json();
+      if (!demandId || !text?.trim()) return Response.json({ error: 'Mensagem e demanda são obrigatórias.' }, { status: 400 });
+      const { data: demand } = await supabaseAdmin.from('demands').select('id,citizen_name').eq('id', demandId).eq('citizen_user_id', auth.userId).maybeSingle();
+      if (!demand) return Response.json({ error: 'Demanda não encontrada.' }, { status: 404 });
+      const { data, error } = await supabaseAdmin.from('demand_messages').insert({
+        demand_id: demandId,
+        sender_type: 'citizen',
+        sender_name: demand.citizen_name,
+        text: text.trim(),
+        attachments: Array.isArray(attachments) ? attachments : [],
+      }).select('id,demand_id,sender_type,sender_name,text,attachments,created_at').single();
+      if (error) throw error;
+      return Response.json(data);
+    } catch (error) {
+      console.error('[api/citizen/messages]', error);
+      return Response.json({ error: 'Falha ao enviar mensagem.' }, { status: 500 });
+    }
+  },
+
+  '/api/demands': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (request.method !== 'GET') return methodNotAllowed();
+    if (!(await canEffective(authResult.userId, authResult.role, 'cidadão', 'view'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+    try {
+      const demands = await getAllDemandsAdmin();
+      return Response.json(demands);
+    } catch (error) {
+      console.error('[api/demands] error:', error);
+      return Response.json({ error: 'Falha ao carregar demandas' }, { status: 500 });
+    }
+  },
+
+  '/api/demands/:id': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (request.method !== 'PUT') return methodNotAllowed();
+    if (!(await canEffective(authResult.userId, authResult.role, 'cidadão', 'edit'))) return Response.json({ error: 'Acesso negado' }, { status: 403 });
+    try {
+      const id = (request as any).params?.id;
+      if (!id) return Response.json({ error: 'id é obrigatório' }, { status: 400 });
+      const body = await request.json();
+      const actor: { id?: string; name?: string; role?: string } = {
+        id: authResult.userId,
+      };
+      // Resolve actor name/role for history entries when possible
+      if (actor.id) {
+        const me = await getAdminUserById(actor.id);
+        if (me) { actor.name = me.name; if (me.role) actor.role = me.role; }
+      }
+      const updated = await updateDemandAdmin(id, body, actor);
+      if (!updated) return Response.json({ error: 'Demanda não encontrada' }, { status: 404 });
+      return Response.json(updated);
+    } catch (error) {
+      console.error('[api/demands/:id] error:', error);
+      return Response.json({ error: 'Falha ao atualizar demanda' }, { status: 500 });
+    }
+  },
+
+  '/api/admin/users/:id/permissions': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (!(await canEffective(authResult.userId, authResult.role, 'administração', 'manage_users'))) return Response.json({ error: 'Acesso negado para consultar permissões.' }, { status: 403 });
+    if (request.method !== 'GET') return methodNotAllowed();
+    const id = (request as any).params?.id;
+    if (!id) return Response.json({ error: 'ID do usuário é obrigatório.' }, { status: 400 });
+    const user = await getAdminUserById(id);
+    if (!user) return Response.json({ error: 'Usuário não encontrado.' }, { status: 404 });
+    try {
+      return Response.json({ userId: id, role: user.role, permissions: await getEffectivePermissions(id, user.role) });
+    } catch (error) {
+      console.error('[api/admin/users/:id/permissions]', error);
+      return Response.json({ error: error?.message || 'Falha ao carregar permissões efetivas.' }, { status: 500 });
+    }
+  },
+
+  '/api/admin/users/:id': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (!(await canEffective(authResult.userId, authResult.role, 'administração', 'manage_users'))) return Response.json({ error: 'Acesso negado para gerenciar usuários.' }, { status: 403 });
+    if (request.method !== 'PATCH') return methodNotAllowed();
+    const id = (request as any).params?.id;
+    if (!id) return Response.json({ error: 'ID do usuário é obrigatório.' }, { status: 400 });
+    try {
+      const body = await request.json();
+      if (body.action === 'role') {
+        return Response.json(await updateAdminUserRole(id, body.role, authResult.user));
+      }
+      if (body.action === 'access') {
+        if (typeof body.active !== 'boolean') return Response.json({ error: 'active deve ser boolean.' }, { status: 400 });
+        return Response.json(await setAdminUserAccess(id, body.active, authResult.user));
+      }
+      return Response.json({ error: 'Ação de usuário inválida.' }, { status: 400 });
+    } catch (error) {
+      console.error('[api/admin/users/:id]', error);
+      return Response.json({ error: error?.message || 'Falha ao atualizar usuário.' }, { status: 400 });
+    }
+  },
+
+  '/api/admin/invites': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (!(await canEffective(authResult.userId, authResult.role, 'administração', 'manage_users'))) return Response.json({ error: 'Acesso negado para gerenciar convites.' }, { status: 403 });
+    if (request.method === 'GET') {
+      return respond(() => getAdminInvites(), 'admin/invites', 'Falha ao carregar convites.');
+    }
+    if (request.method === 'POST') {
+      try {
+        const body = await request.json();
+        const origin = new URL(request.url).origin;
+        const result = await createAdminInvite({
+          email: body.email,
+          name: body.name,
+          cargo: body.cargo,
+          role: body.role,
+          invitedBy: authResult.userId,
+          origin,
+          sendEmail: body.sendEmail !== false,
+          permissionKeys: Array.isArray(body.permissionKeys) ? body.permissionKeys : [],
+        });
+        return Response.json(result, { status: 201 });
+      } catch (error) {
+        console.error('[api/admin/invites POST]', error);
+        return Response.json({ error: error?.message || 'Falha ao criar convite.' }, { status: 400 });
+      }
+    }
+    return methodNotAllowed();
+  },
+
+  '/api/admin/invites/:id': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (!(await canEffective(authResult.userId, authResult.role, 'administração', 'manage_users'))) return Response.json({ error: 'Acesso negado para gerenciar convites.' }, { status: 403 });
+    if (request.method !== 'PATCH') return methodNotAllowed();
+    const id = (request as any).params?.id;
+    if (!id) return Response.json({ error: 'ID do convite é obrigatório.' }, { status: 400 });
+    try {
+      const body = await request.json();
+      if (body.action === 'approve') return Response.json(await approveAdminInvite(id, authResult.userId));
+      if (body.action === 'reject') return Response.json(await rejectAdminInvite(id, authResult.userId));
+      if (body.action === 'revoke') return Response.json(await revokeAdminInvite(id, authResult.userId));
+      if (body.action === 'renew') {
+        return Response.json(await renewAdminInvite(id, new URL(request.url).origin));
+      }
+      return Response.json({ error: 'Ação de convite inválida.' }, { status: 400 });
+    } catch (error) {
+      console.error('[api/admin/invites/:id]', error);
+      return Response.json({ error: error?.message || 'Falha ao atualizar convite.' }, { status: 400 });
+    }
+  },
+
+  '/api/invites/:token/accept': async (request) => {
+    if (request.method !== 'POST') return methodNotAllowed();
+    const authorization = request.headers.get('authorization') ?? '';
+    const match = authorization.match(/^Bearer\s+(.+)$/i);
+    if (!match) return Response.json({ error: 'Não autenticado.' }, { status: 401 });
+    const { data: authData, error: authError } = await supabaseAdmin.auth.getUser(match[1]);
+    if (authError || !authData.user?.id || !authData.user.email) return Response.json({ error: 'Sessão de convite inválida.' }, { status: 401 });
+    const token = (request as any).params?.token;
+    if (!token) return Response.json({ error: 'Token do convite é obrigatório.' }, { status: 400 });
+    try {
+      return Response.json(await acceptAdminInvite(token, authData.user.id, authData.user.email));
+    } catch (error) {
+      console.error('[api/invites/:token/accept]', error);
+      return Response.json({ error: error?.message || 'Não foi possível aceitar o convite.' }, { status: 400 });
+    }
+  },
+
+  '/api/audit-logs': async (request) => {
+    const authResult = await requireAuth(request);
+    if (authResult instanceof Response) return authResult;
+    if (request.method !== 'GET') return methodNotAllowed();
+    if (!(await canEffective(authResult.userId, authResult.role, 'administração', 'view_audit'))) {
+      return Response.json({ error: 'Acesso negado para consultar auditoria.' }, { status: 403 });
+    }
+    try {
+      const logs = await getAdminAuditLogs();
+      return Response.json(logs);
+    } catch (error) {
+      console.error('[api/audit-logs] error:', error);
+      return Response.json({ error: 'Falha ao carregar trilha de auditoria' }, { status: 500 });
+    }
+  },
+};
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    runtimeEnv = env;
+    // Cloudflare Worker: bindings live on env, not process.env. Upgrade the
+    // admin client once the service key arrives so admin/auth routes work.
+    if (env.SUPABASE_SERVICE_ROLE_KEY) configureSupabaseAdmin(env.SUPABASE_SERVICE_ROLE_KEY, env.SUPABASE_URL);
+
+    const url = new URL(request.url);
+    
+    let response: Response;
+    let isHtml = false;
+    
+    if (url.pathname.startsWith('/api/')) {
+      try {
+        // Look for exact match first
+        let handler = routeHandlers[url.pathname];
+        let params: Record<string, string> = {};
+        
+        if (!handler) {
+          // Try pattern matching for routes with parameters
+          for (const pattern in routeHandlers) {
+            if (pattern.includes(':')) {
+              params = extractPathParams(pattern, url.pathname);
+              if (params !== null) {
+                handler = routeHandlers[pattern];
+                break;
+              }
+            }
+          }
+        }
+        
+        if (!handler) {
+          response = Response.json({ error: 'Not Found' }, { status: 404 });
+        } else {
+          const enhancedRequest = request as any;
+          enhancedRequest.params = params;
+
+          const method = request.method;
+          let requiredRoles: string[] | null = null;
+          if (url.pathname === '/api/auth/me' || url.pathname === '/api/auth/config') requiredRoles = [];
+          else if (url.pathname.startsWith('/api/admin/pages')) requiredRoles = null;
+          // RBAC efetivo é aplicado dentro dos handlers para tarefas, demandas,
+          // convites, usuários e auditoria. Não duplicar papel estático aqui.
+          else if ((url.pathname === '/api/news' || url.pathname.startsWith('/api/news/')) && method !== 'GET') requiredRoles = null;
+          else if ((url.pathname === '/api/agenda' || url.pathname.startsWith('/api/agenda/')) && method !== 'GET') requiredRoles = null;
+          else if ((url.pathname === '/api/results' || url.pathname.startsWith('/api/results/') || url.pathname === '/api/municipalities' || url.pathname.startsWith('/api/municipalities/')) && method !== 'GET') requiredRoles = null;
+          else if (url.pathname === '/api/admin/documents' || url.pathname.startsWith('/api/admin/documents/')) requiredRoles = null;
+          else if ((url.pathname === '/api/videos' || url.pathname.startsWith('/api/videos/')) && method !== 'GET') requiredRoles = null;
+          else if (url.pathname === '/api/admin/upload') requiredRoles = null;
+          else if (url.pathname === '/api/settings' && method !== 'GET') requiredRoles = null;
+
+          if (requiredRoles !== null) {
+            if (requiredRoles.length === 0) {
+              response = await handler(enhancedRequest);
+            } else {
+              const auth = await requireAuth(enhancedRequest);
+              if (auth instanceof Response) response = auth;
+              else if (!requiredRoles.includes(auth.role)) response = Response.json({ error: 'Acesso negado para este papel' }, { status: 403 });
+              else response = await handler(enhancedRequest);
+            }
+          } else {
+            response = await handler(enhancedRequest);
+          }
+        }
+      } catch (err: any) {
+        console.error('[worker uncaught api error]', err);
+        response = Response.json({ error: err?.message || 'Erro interno no servidor' }, { status: 500 });
+      }
+    } else {
+      // Non-API requests: serve static assets. `assets.not_found_handling:
+      // single-page-application` handles SPA client routes before reaching here.
+      response = await env.ASSETS.fetch(request);
+      const contentType = response.headers.get('content-type') || '';
+      isHtml = contentType.includes('text/html');
+    }
+    
+    // Apply security headers to all responses
+    return addSecurityHeaders(response, isHtml);
+  },
+};
