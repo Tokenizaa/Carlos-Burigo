@@ -1,11 +1,9 @@
 import React from 'react';
 import { FilterProvider, useFilter } from '../../context/FilterContext';
-import { AssistantProvider } from '../../context/AssistantContext';
 import { ElectionDataProvider, ElectionDataGate } from '../../hooks/useElectionData';
 import { Header } from '../../components/Header';
 import { ActiveFiltersBar } from '../../components/ActiveFiltersBar';
 import { GlobalFiltersModal } from '../../components/GlobalFiltersModal';
-import { ContextualAssistant } from '../../components/ContextualAssistant';
 import { OverviewView } from '../../views/OverviewView';
 import { PerformanceView } from '../../views/PerformanceView';
 import { TerritorialView } from '../../views/TerritorialView';
@@ -81,17 +79,14 @@ export const AdminElectoralIntelligenceTab: React.FC<{
   return (
     <ElectionDataProvider>
       <FilterProvider>
-        <AssistantProvider>
-          <ElectionDataGate>
+        <ElectionDataGate>
             <TabSynchronizer subTab={subTab} onSelectSubTab={onSelectSubTab} />
             <div className="flex-1 flex flex-col min-w-0 bg-white rounded-2xl border border-stone-200 shadow-xs overflow-hidden">
               <Header />
               <MainContent />
               <GlobalFiltersModal />
-              <ContextualAssistant />
             </div>
-          </ElectionDataGate>
-        </AssistantProvider>
+        </ElectionDataGate>
       </FilterProvider>
     </ElectionDataProvider>
   );
