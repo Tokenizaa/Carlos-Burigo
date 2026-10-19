@@ -7,7 +7,7 @@ import { exportToCSV } from '../utils/csvExport';
 import { computeMunicipalityMetrics, formatNumber, formatPercent, formatPP } from '../utils/electoralMath';
 
 export const Header: React.FC = () => {
-  const { filters, activeTab, setIsFilterModalOpen, resetFilters, applyPreset } = useFilter();
+  const { filters, activeTab, setIsFilterModalOpen, resetFilters, applyPreset, updateFilter } = useFilter();
   const { toggleOpen, isOpen } = useAssistant();
   const { municipalities: MUNICIPALITIES_DATA } = useElectionData();
 
@@ -93,6 +93,28 @@ export const Header: React.FC = () => {
           <span className="truncate">{filters.office}</span>
           <span aria-hidden="true" className="text-neutral-300">·</span>
           <span className="truncate">{filters.state}</span>
+        </div>
+
+        {/* Filtro primário do ciclo eleitoral */}
+        <div className="flex items-center gap-3 rounded-xl border-2 border-emerald-700 bg-emerald-50 px-4 py-2 shadow-sm">
+          <div className="flex flex-col leading-tight">
+            <span className="text-[10px] font-extrabold uppercase tracking-widest text-emerald-800">Eleição em análise</span>
+            <span className="text-xs font-semibold text-emerald-950">Comparar ciclos</span>
+          </div>
+          <select
+            aria-label="Selecionar comparação entre eleições"
+            value={`${filters.startYear}-${filters.endYear}`}
+            onChange={(event) => {
+              const [start, end] = event.target.value.split('-').map(Number);
+              updateFilter('startYear', start as 2018 | 2022 | 2026);
+              updateFilter('endYear', end as 2018 | 2022 | 2026);
+            }}
+            className="min-h-10 min-w-[170px] rounded-lg border border-emerald-700 bg-white px-3 py-2 text-sm font-bold text-emerald-950 shadow-sm outline-none focus:ring-2 focus:ring-emerald-600"
+          >
+            <option value="2018-2022">2018 → 2022</option>
+            <option value="2022-2026">2022 → 2026</option>
+            <option value="2018-2026">2018 → 2026</option>
+          </select>
         </div>
 
         {/* Action Controls */}
